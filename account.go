@@ -74,7 +74,12 @@ func (a *App) Login(email, password string) (AccountInfo, error) {
 	if err != nil {
 		return a.GetAccount(), err
 	}
+	return a.completeLogin(domain, email, token)
+}
 
+// completeLogin 用已有凭证（auth_data）完成登录：拉取订阅地址与套餐 → 写入账户 → 导入订阅节点。
+// 密码登录与网页授权回传（weblogin.go）共用此入口。
+func (a *App) completeLogin(domain, email, token string) (AccountInfo, error) {
 	transfer, usedUp, usedDown, expire, planName, subURL, err := v2boardGetSubscribe(domain, token)
 	if err != nil {
 		return a.GetAccount(), fmt.Errorf("login succeeded, but failed to fetch subscription: %v", err)

@@ -125,6 +125,7 @@ type App struct {
 	tunSampleDown  int64
 	account        AccountInfo
 	quitting       bool // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
+	webLogin       webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）
 }
 
 func NewApp() *App {
@@ -914,6 +915,7 @@ func (a *App) cleanup() {
 		setWindowsSystemProxy(false, "")
 		a.systemProxy = false
 	}
+	a.stopWebLogin()
 	a.stopCoreLocked()
 	a.stopTunLocked()
 	a.savePersisted()

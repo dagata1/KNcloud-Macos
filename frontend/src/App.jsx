@@ -58,6 +58,7 @@ import {
   RefreshAccount,
   Logout,
   SyncNodes,
+  StartWebLogin,
   GetLogs,
   ClearLogs,
   GetSettings,
@@ -133,6 +134,7 @@ export default function App() {
   const [loginErr, setLoginErr] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [webLoginWaiting, setWebLoginWaiting] = useState(false); // 网页授权登录等待中
 
   const fmtGB = (b) => {
     if (!b || b <= 0) return '0 GB';
@@ -279,6 +281,38 @@ export default function App() {
       setLoginErr(String(e?.message || e).replace(/^.*?: /, ''));
     }
     setLoginBusy(false);
+  };
+
+  // 网页授权登录：后端拉起浏览器并在本机等回调，结果通过事件异步回传
+  useEffect(() => {
+    const offOk = EventsOn('kncloud:web-login', async (acct) => {
+      setWebLoginWaiting(false);
+      if (acct) setAccount(acct);
+      try {
+        setSubscriptions(await GetSubscriptions());
+        setNodes(await GetNodes());
+      } catch (e) { /* ignore */ }
+      showToast('网页登录成功，订阅已同步', 'success');
+    });
+    const offErr = EventsOn('kncloud:web-login-error', (msg) => {
+      setWebLoginWaiting(false);
+      showToast(String(msg || '网页登录失败'), 'error');
+    });
+    return () => {
+      if (typeof offOk === 'function') offOk();
+      if (typeof offErr === 'function') offErr();
+    };
+  }, []);
+
+  const handleWebLogin = async () => {
+    if (webLoginWaiting) return;
+    setLoginErr('');
+    try {
+      await StartWebLogin();
+      setWebLoginWaiting(true);
+    } catch (e) {
+      setLoginErr(String(e?.message || e).replace(/^.*?: /, ''));
+    }
   };
 
   const handleLogout = async () => {
@@ -428,9 +462,7 @@ export default function App() {
     return (
       <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
         <header className="titlebar drag-region">
-          <div className="titlebar-left">
-            <img src={brandLogo} alt="KNcloud-WIN" style={{ height: "22px", width: "auto", display: "block" }} />
-          </div>
+          <div className="titlebar-left" />
           <div className="titlebar-right no-drag">
             <button className="win-caption-btn" onClick={() => WindowMin()} title="最小化"><Minus size={13} /></button>
             <button className="win-caption-btn" onClick={() => WindowMax()} title="最大化"><Square size={11} /></button>
@@ -440,8 +472,6 @@ export default function App() {
         {renderToasts()}
         <div className="login-body">
           <img src={loginLogo} alt="" className="login-logo" style={{ height: "64px", width: "auto", objectFit: "contain" }} />
-          <h2 className="login-title">登录 KNcloud 账户</h2>
-          <p className="login-sub">登录后自动同步订阅节点与套餐用量</p>
           <input
             type="email"
             className="win11-input login-input"
@@ -458,9 +488,17 @@ export default function App() {
             onKeyDown={e => { if (e.key === 'Enter') handleLogin(); }}
           />
           {loginErr && <div className="login-err">{loginErr}</div>}
-          <button className="win11-btn primary login-btn" disabled={loginBusy} onClick={handleLogin}>
+          <button className="win11-btn primary login-btn" disabled={loginBusy || webLoginWaiting} onClick={handleLogin}>
             {loginBusy ? '登录中…' : '登 录'}
           </button>
+          <div className="login-divider"><span>或</span></div>
+          <button className="win11-btn login-btn" disabled={loginBusy || webLoginWaiting} onClick={handleWebLogin}>
+            <Globe size={14} />
+            <span>跳转网页登录</span>
+          </button>
+          {webLoginWaiting && (
+            <div className="login-waiting">已在系统浏览器打开 KNcloud 官网，登录并授权后将自动返回本客户端</div>
+          )}
         </div>
       </div>
     );

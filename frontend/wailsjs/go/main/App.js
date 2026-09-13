@@ -86,6 +86,14 @@ export function SkipLogin() {
   return window['go']['main']['App']['SkipLogin']();
 }
 
+export function StartWebLogin() {
+  return window['go']['main']['App']['StartWebLogin']();
+}
+
+export function CancelWebLogin() {
+  return window['go']['main']['App']['CancelWebLogin']();
+}
+
 export function SyncNodes() {
   return window['go']['main']['App']['SyncNodes']();
 }

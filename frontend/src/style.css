@@ -771,6 +771,34 @@ select.win11-input option {
   justify-content: center;
 }
 
+.login-divider {
+  width: 320px;
+  max-width: 86%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  margin: 2px 0;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.login-waiting {
+  width: 320px;
+  max-width: 86%;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: center;
+  line-height: 1.6;
+}
+
 .login-skip {
   background: none;
   border: none;

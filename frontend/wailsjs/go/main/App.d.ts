@@ -44,6 +44,10 @@ export function SimpleConnect(arg1:boolean):Promise<boolean>;
 
 export function SkipLogin():Promise<main.AccountInfo>;
 
+export function StartWebLogin():Promise<string>;
+
+export function CancelWebLogin():Promise<void>;
+
 export function SyncNodes():Promise<void>;
 
 export function ToggleCore(arg1:boolean):Promise<boolean>;
