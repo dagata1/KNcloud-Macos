@@ -142,13 +142,10 @@ func (t *trayController) buildMenu() {
 	coreRunning := a.coreRunning
 	tunRunning := a.tunRunning
 	routingMode := a.routingMode
-	systemProxy := a.systemProxy
 	activeNodeID := a.activeNodeID
 	nodes := make([]NodeItem, len(a.nodes))
 	copy(nodes, a.nodes)
 	a.mu.RUnlock()
-
-	autoStart := isAutoStartEnabled()
 
 	// 当前活动节点名（仅用于悬停提示）
 	activeName := ""
@@ -176,17 +173,19 @@ func (t *trayController) buildMenu() {
 	}
 	systray.SetTooltip(statusLabel)
 
-	// ---------- 连接开关 ----------
-	if coreRunning || tunRunning {
-		miDisconnect := systray.AddMenuItem("断开连接", "停止内核与 TUN，并关闭系统代理")
-		miDisconnect.Click(func() { go a.trayDisconnect() })
-	} else {
-		miConnect := systray.AddMenuItem("一键连接", "启动内核并开启系统代理")
-		miConnect.Click(func() { go a.trayConnect() })
-	}
+	// ---------- 模式选择 ----------
+	miMode := systray.AddMenuItem("模式选择", "选择代理方式：内核代理或 TUN 虚拟网卡")
+	childProxy := miMode.AddSubMenuItemCheckbox("代理模式", "内核代理 + 系统代理（127.0.0.1 本地端口）", !tunRunning)
+	childProxy.Click(func() { go a.traySetMode("proxy") })
+	childTun := miMode.AddSubMenuItemCheckbox("TUN 模式", "虚拟网卡接管全部流量：大陆直连、海外走代理，含 IPv6 防泄漏（需管理员权限）", tunRunning)
+	childTun.Click(func() { go a.traySetMode("tun") })
 
 	// ---------- 分流模式 ----------
 	miRouting := systray.AddMenuItem("路由模式", "切换分流策略")
+	if tunRunning {
+		// TUN 自带分流（大陆直连、海外代理），路由模式仅对内核代理生效
+		miRouting.Disable()
+	}
 	for _, m := range []struct{ id, label string }{
 		{"bypass-cn", "绕过大陆 (GFWList & CN)"},
 		{"global", "全局代理"},
@@ -229,18 +228,6 @@ func (t *trayController) buildMenu() {
 
 	systray.AddSeparator()
 
-	// ---------- 开关项 ----------
-	miProxy := systray.AddMenuItemCheckbox("系统代理", "开启 / 关闭 Windows 系统代理", systemProxy)
-	miProxy.Click(func() { go a.trayToggleSystemProxy() })
-
-	miTun := systray.AddMenuItemCheckbox("TUN 模式", "虚拟网卡接管全部流量：大陆直连、海外走代理，含 IPv6 防泄漏（需管理员权限）", tunRunning)
-	miTun.Click(func() { go a.trayToggleTun() })
-
-	miAuto := systray.AddMenuItemCheckbox("开机自启", "登录 Windows 后自动启动 KNcloud-WIN", autoStart)
-	miAuto.Click(func() { go a.trayToggleAutoStart() })
-
-	systray.AddSeparator()
-
 	miQuit := systray.AddMenuItem("退出 KNcloud-WIN", "退出程序并还原系统代理")
 	miQuit.Click(func() { go a.quitApp() })
 }
@@ -256,42 +243,22 @@ func truncateRunes(s string, max int) string {
 
 // ------------------------- 托盘菜单动作 -------------------------
 
-func (a *App) trayConnect() {
-	if _, err := a.ToggleCore(true); err != nil {
-		a.addLogInternal("error", fmt.Sprintf("Tray: start core failed: %v", err))
-	} else {
-		_, _ = a.ToggleSystemProxy(true)
-	}
-	a.notifyFrontend()
-	tray.requestRebuild()
-}
-
-func (a *App) trayDisconnect() {
-	if _, err := a.ToggleCore(false); err != nil {
-		a.addLogInternal("error", fmt.Sprintf("Tray: stop core failed: %v", err))
-	}
-	a.mu.Lock()
-	if a.tunRunning {
-		a.stopTunLocked()
-	}
-	if a.systemProxy {
-		setWindowsSystemProxy(false, "")
-		a.systemProxy = false
-	}
-	a.savePersisted()
-	a.mu.Unlock()
-
-	a.notifyFrontend()
-	tray.requestRebuild()
-}
-
-func (a *App) trayToggleTun() {
+// traySetMode 切换代理模式：proxy=内核代理+系统代理，tun=TUN 虚拟网卡。
+// 两种模式互斥，SimpleConnect 内部负责停/恢复另一模式与系统代理。
+func (a *App) traySetMode(mode string) {
 	a.mu.RLock()
-	running := a.tunRunning
+	tunRunning := a.tunRunning
 	a.mu.RUnlock()
 
-	if _, err := a.SimpleConnect(!running); err != nil {
-		a.addLogInternal("error", fmt.Sprintf("Tray: TUN toggle failed: %v", err))
+	switch {
+	case mode == "tun" && !tunRunning:
+		if _, err := a.SimpleConnect(true); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Tray: switch to TUN mode failed: %v", err))
+		}
+	case mode == "proxy" && tunRunning:
+		if _, err := a.SimpleConnect(false); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Tray: switch to proxy mode failed: %v", err))
+		}
 	}
 	a.notifyFrontend()
 	tray.requestRebuild()
@@ -307,37 +274,6 @@ func (a *App) traySelectNode(id string) {
 
 func (a *App) traySetRoutingMode(mode string) {
 	a.SetRoutingMode(mode)
-	a.notifyFrontend()
-	tray.requestRebuild()
-}
-
-func (a *App) trayToggleSystemProxy() {
-	a.mu.RLock()
-	current := a.systemProxy
-	a.mu.RUnlock()
-
-	if _, err := a.ToggleSystemProxy(!current); err != nil {
-		a.addLogInternal("error", fmt.Sprintf("Tray: toggle system proxy failed: %v", err))
-	}
-	a.notifyFrontend()
-	tray.requestRebuild()
-}
-
-func (a *App) trayToggleAutoStart() {
-	next := !isAutoStartEnabled()
-	if err := setAutoStart(next); err != nil {
-		a.addLogInternal("error", fmt.Sprintf("Tray: update auto-start failed: %v", err))
-	} else {
-		a.mu.Lock()
-		a.settings.AutoStart = next
-		a.savePersisted()
-		a.mu.Unlock()
-		if next {
-			a.addLogInternal("info", "Tray: auto-start on Windows logon enabled")
-		} else {
-			a.addLogInternal("info", "Tray: auto-start on Windows logon disabled")
-		}
-	}
 	a.notifyFrontend()
 	tray.requestRebuild()
 }
