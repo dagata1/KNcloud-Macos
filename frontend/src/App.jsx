@@ -705,7 +705,6 @@ export default function App() {
               <div className="content-header">
                 <div>
                   <h1 className="content-title">运行状态概览</h1>
-                  <p className="content-subtitle">服务已自动运行，选择分流策略即可</p>
                 </div>
               </div>
 
