@@ -8,6 +8,8 @@ export function CancelWebLogin():Promise<void>;
 
 export function ClearLogs():Promise<void>;
 
+export function CopyNodeShareLink(arg1:string):Promise<boolean>;
+
 export function DeleteNode(arg1:string):Promise<void>;
 
 export function GetAccount():Promise<main.AccountInfo>;
@@ -21,6 +23,8 @@ export function GetNodes():Promise<Array<main.NodeItem>>;
 export function GetSettings():Promise<main.AppSettings>;
 
 export function GetSubscriptions():Promise<Array<main.SubscriptionItem>>;
+
+export function ImportNodesFromClipboard():Promise<number>;
 
 export function ImportNodesFromLinks(arg1:string):Promise<number>;
 

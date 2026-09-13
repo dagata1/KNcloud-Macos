@@ -245,6 +245,80 @@ func ParseShareLinks(content string) []NodeItem {
 	return nodes
 }
 
+// BuildShareLink 将节点转换回标准分享链接（ParseShareLink 的逆操作），用于复制到剪贴板。
+func BuildShareLink(n NodeItem) (string, error) {
+	switch n.Protocol {
+	case "Shadowsocks":
+		if n.Method == "" || n.UUID == "" {
+			return "", fmt.Errorf("Shadowsocks node missing cipher method or password")
+		}
+		// SIP002: ss://base64url(method:password)@host:port#name
+		user := base64.RawURLEncoding.EncodeToString([]byte(n.Method + ":" + n.UUID))
+		return fmt.Sprintf("ss://%s@%s:%d#%s", user, n.Address, n.Port, url.QueryEscape(n.Name)), nil
+	case "VMess":
+		tls := n.Security
+		if tls != "tls" && tls != "reality" {
+			tls = ""
+		}
+		j := map[string]string{
+			"v": "2", "ps": n.Name, "add": n.Address, "port": strconv.Itoa(n.Port),
+			"id": n.UUID, "aid": strconv.Itoa(n.AlterID), "scy": "auto",
+			"net": firstNonEmpty(n.Network, "tcp"), "tls": tls,
+			"sni": n.SNI, "host": n.HostName, "path": n.Path, "fp": n.FP,
+		}
+		data, err := json.Marshal(j)
+		if err != nil {
+			return "", err
+		}
+		return "vmess://" + base64.RawURLEncoding.EncodeToString(data), nil
+	case "VLESS", "Trojan", "Hysteria2":
+		q := url.Values{}
+		if n.Security != "" && n.Security != "none" {
+			q.Set("security", n.Security)
+		}
+		if n.Network != "" && n.Network != "tcp" {
+			q.Set("type", n.Network)
+		}
+		if n.SNI != "" {
+			q.Set("sni", n.SNI)
+		}
+		if n.FP != "" {
+			q.Set("fp", n.FP)
+		}
+		if n.Flow != "" {
+			q.Set("flow", n.Flow)
+		}
+		if n.PBK != "" {
+			q.Set("pbk", n.PBK)
+		}
+		if n.SID != "" {
+			q.Set("sid", n.SID)
+		}
+		if n.Path != "" {
+			q.Set("path", n.Path)
+		}
+		if n.HostName != "" {
+			q.Set("host", n.HostName)
+		}
+		if n.ServiceName != "" {
+			q.Set("serviceName", n.ServiceName)
+		}
+		scheme := strings.ToLower(n.Protocol)
+		u := url.URL{
+			Scheme: scheme,
+			User:   url.User(n.UUID),
+			Host:   fmt.Sprintf("%s:%d", n.Address, n.Port),
+		}
+		if enc := q.Encode(); enc != "" {
+			u.RawQuery = enc
+		}
+		u.Fragment = n.Name
+		return u.String(), nil
+	default:
+		return "", fmt.Errorf("unsupported protocol: %s", n.Protocol)
+	}
+}
+
 func isInfoPseudoNode(n NodeItem) bool {
 	host := strings.ToLower(n.Address)
 	if host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" || host == "localhost" {

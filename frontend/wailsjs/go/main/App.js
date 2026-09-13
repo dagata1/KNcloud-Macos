@@ -14,6 +14,10 @@ export function ClearLogs() {
   return window['go']['main']['App']['ClearLogs']();
 }
 
+export function CopyNodeShareLink(arg1) {
+  return window['go']['main']['App']['CopyNodeShareLink'](arg1);
+}
+
 export function DeleteNode(arg1) {
   return window['go']['main']['App']['DeleteNode'](arg1);
 }
@@ -40,6 +44,10 @@ export function GetSettings() {
 
 export function GetSubscriptions() {
   return window['go']['main']['App']['GetSubscriptions']();
+}
+
+export function ImportNodesFromClipboard() {
+  return window['go']['main']['App']['ImportNodesFromClipboard']();
 }
 
 export function ImportNodesFromLinks(arg1) {
