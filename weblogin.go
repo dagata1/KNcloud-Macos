@@ -125,6 +125,10 @@ func (a *App) StartWebLogin() (string, error) {
 			return
 		}
 		email := strings.TrimSpace(res.email)
+		if email == "" || email == "web-login" {
+			// 网页端可能只回传 token：用凭证拉取账户信息补全邮箱（尽力而为）
+			email = fetchV2boardEmail(domain, res.token)
+		}
 		if email == "" {
 			email = "web-login"
 		}

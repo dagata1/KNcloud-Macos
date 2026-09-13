@@ -187,6 +187,36 @@ func (a *App) RefreshAccount() (AccountInfo, error) {
 
 // ------------------------- V2Board API -------------------------
 
+// fetchV2boardEmail 用登录凭证拉取账户邮箱（网页授权回传只带 token 时补全用），失败返回空串
+func fetchV2boardEmail(domain, token string) string {
+	domain = strings.TrimRight(domain, "/")
+	req, err := http.NewRequest("GET", domain+"/api/v1/user/info", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", token)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return ""
+	}
+	var out struct {
+		Data struct {
+			Email string `json:"email"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(data, &out) != nil {
+		return ""
+	}
+	return out.Data.Email
+}
+
 func v2boardLogin(domain, email, password string) (string, error) {
 	domain = strings.TrimRight(domain, "/")
 	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
