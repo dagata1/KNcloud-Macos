@@ -71,6 +71,10 @@ func (a *App) loadPersisted() bool {
 	if !settingsHasKey(data, "minimizeToTray") {
 		a.settings.MinimizeToTray = true
 	}
+	// 旧版本配置文件里没有 autoStart 字段：默认开启「开机自动启动」
+	if !settingsHasKey(data, "autoStart") {
+		a.settings.AutoStart = true
+	}
 	if cfg.RoutingMode != "" {
 		a.routingMode = cfg.RoutingMode
 	}

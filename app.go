@@ -139,7 +139,7 @@ func NewApp() *App {
 			UiMode:     "classic",
 			SocksPort:  10808,
 			HttpPort:   10809,
-			AutoStart:  false,
+			AutoStart:  true,
 			AllowLan:   false,
 			MuxEnabled: true,
 			CoreType:   "Xray-core",
@@ -217,6 +217,13 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	a.ctx = ctx
 	a.mu.Unlock()
+
+	// 开机自启：以持久化设置为准同步注册表 Run 键（首次运行默认开启；
+	// 程序换了安装路径也会在这里把自启项更新到新 exe）。需在托盘构建前执行，
+	// 这样托盘菜单的勾选状态与设置页一致。
+	if err := setAutoStart(a.settings.AutoStart); err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Sync auto-start failed: %v", err))
+	}
 
 	// 系统托盘：右下角常驻图标 + 右键菜单
 	startTray(a)
@@ -860,6 +867,19 @@ func (a *App) SaveSettings(settings AppSettings) error {
 	}
 	a.settings = settings
 	a.addLogInternal("info", "Preferences saved")
+
+	// 开机自启：设置项是唯一事实来源，变更时同步写入 / 移除注册表 Run 键；
+	// 写注册表失败则回滚设置，避免界面显示与实际自启状态不一致。
+	if old.AutoStart != settings.AutoStart {
+		if err := setAutoStart(settings.AutoStart); err != nil {
+			a.settings.AutoStart = old.AutoStart
+			a.addLogInternal("error", fmt.Sprintf("Update auto-start failed: %v", err))
+		} else if settings.AutoStart {
+			a.addLogInternal("info", "Auto-start on Windows logon enabled")
+		} else {
+			a.addLogInternal("info", "Auto-start on Windows logon disabled")
+		}
+	}
 
 	needsRestart := a.coreRunning &&
 		(old.SocksPort != settings.SocksPort ||
