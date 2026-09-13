@@ -838,6 +838,19 @@ select.win11-input option {
   font-size: 11px;
 }
 
+.simple-account-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.simple-account-actions .win11-btn {
+  height: 30px;
+  font-size: 12px;
+  padding: 0 10px;
+}
+
 .simple-account-bar,
 .account-card .simple-account-bar {
   height: 6px;
