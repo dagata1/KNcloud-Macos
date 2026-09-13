@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -604,54 +603,11 @@ func rangeToCIDRs(start, end uint64) []net.IPNet {
 // computeBypassRoutes 计算需要送进虚拟网卡的 CIDR 列表 =
 // 全网空间 - 中国大陆 IP（geo/cn-routes.txt）- 保留网段
 // 等价 SSTap「Skip all China IP」规则集生成的路由表
+// computeBypassRoutes 绕过大陆策略的分流路由（非中国大陆 CIDR 全集）。
+// 计算逻辑已迁移到 sstap.go 的策略引擎（sstapPolicyRoutes）。
 func computeBypassRoutes() []net.IPNet {
-	const full = uint64(1) << 32
-	type rng struct{ s, e uint64 }
-
-	var blocks []rng
-	addCIDR := func(s string) {
-		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(s))
-		if err != nil || ipnet.IP.To4() == nil {
-			return
-		}
-		ones, _ := ipnet.Mask.Size()
-		start := uint64(binary.BigEndian.Uint32(ipnet.IP.To4()))
-		size := uint64(1) << (32 - ones)
-		blocks = append(blocks, rng{start, start + size - 1})
-	}
-	for _, line := range strings.Split(cnRoutesTxt, "\n") {
-		addCIDR(line)
-	}
-	for _, r := range reservedCIDRs {
-		addCIDR(r)
-	}
-	sort.Slice(blocks, func(i, j int) bool { return blocks[i].s < blocks[j].s })
-
-	merged := blocks[:0]
-	for _, b := range blocks {
-		if n := len(merged); n > 0 && b.s <= merged[n-1].e+1 {
-			if b.e > merged[n-1].e {
-				merged[n-1].e = b.e
-			}
-			continue
-		}
-		merged = append(merged, b)
-	}
-
-	var out []net.IPNet
-	cur := uint64(0)
-	for _, b := range merged {
-		if b.s > cur {
-			out = append(out, rangeToCIDRs(cur, b.s-1)...)
-		}
-		if b.e+1 > cur {
-			cur = b.e + 1
-		}
-	}
-	if cur < full {
-		out = append(out, rangeToCIDRs(cur, full-1)...)
-	}
-	return out
+	routes, _ := sstapPolicyRoutes("bypass-cn")
+	return routes
 }
 
 // tunVerbose 自检（--tun-selftest）时输出的逐步日志；正常运行保持安静
@@ -664,8 +620,9 @@ func vlog(format string, args ...interface{}) {
 }
 
 // applySstapRouting 虚拟网卡就绪后写入整套 SSTap 式网络配置。
+// policy 决定分流路由集合（bypass-cn / global / proxy-cn / sstap:<rules 文件>）。
 // 返回写入物理网卡的节点直连路由（断开时需回收）与 TUN 上生效的分流路由条数。
-func applySstapRouting(node NodeItem, tunIdx uint32) (hostRoutes []mibIPForwardRow, routed int, err error) {
+func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes []mibIPForwardRow, routed int, err error) {
 	hidden := &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
 	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）。
@@ -727,9 +684,13 @@ func applySstapRouting(node NodeItem, tunIdx uint32) (hostRoutes []mibIPForwardR
 		return hostRoutes, 0, fmt.Errorf("failed to write direct host route: system route to %s not found", nodeIPs[0])
 	}
 
-	// 4) 大陆以外的全部 CIDR -> TUN（SSTap「不代理中国 IP」分流）
+	// 4) 按当前策略写分流路由（全部指向 TUN 网关；策略由 sstap.go 的规则引擎计算）
+	routes, polErr := sstapPolicyRoutes(policy)
+	if polErr != nil {
+		return nil, 0, polErr
+	}
 	var firstErr error
-	for _, r := range computeBypassRoutes() {
+	for _, r := range routes {
 		if err := addRoute2(tunIdx, r, gw, routeMetric); err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -973,8 +934,8 @@ func (a *App) startTunLocked(isRetry bool) error {
 	}
 	a.tunIfaceIdx = ifIdx
 
-	// SSTap 方案核心步骤：metric/DNS 劫持 + 服务器防回环路由 + 大陆外全量分流路由
-	hostRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx)
+	// SSTap 方案核心步骤：metric/DNS 劫持 + 服务器防回环路由 + 按当前策略写分流路由
+	hostRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
 	if rtErr != nil {
 		a.stopTunLocked()
 		return fmt.Errorf("SSTap routing setup failed: %v", rtErr)
@@ -1237,97 +1198,33 @@ func tunNodeMatches(a, b NodeItem) bool {
 	return a.Protocol == b.Protocol && a.Address == b.Address && a.Port == b.Port && a.UUID == b.UUID
 }
 
-// SimpleConnect 简易模式一键连接/断开：SSTap 方案分流全局代理（与内核代理模式互斥）。
-// 关闭时 sing-box 与虚拟网卡进入热待机（仅撤路由，进程与网卡常驻），
-// 再次开启且节点未变时只需重铺路由，秒级生效；节点变了才冷启动重建。
-func (a *App) SimpleConnect(start bool) (bool, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if start {
-		if !isElevated() {
-			a.addLogInternal("error", "TUN mode requires administrator privileges")
-			return a.tunRunning, fmt.Errorf("TUN global proxy requires administrator privileges")
+// reapplyTunRoutesLocked 在 sing-box 热待机在线的前提下，按当前策略与活动节点
+// 重铺分流路由（策略变更 / 软停止后恢复共用）。成功置 tunRunning=true；
+// 待机不可用（无待机 / 节点变更）或路由写入失败返回 false。
+func (a *App) reapplyTunRoutesLocked() (bool, error) {
+	var node *NodeItem
+	for i := range a.nodes {
+		if a.nodes[i].Active {
+			node = &a.nodes[i]
+			break
 		}
-
-		var node *NodeItem
-		for i := range a.nodes {
-			if a.nodes[i].Active {
-				node = &a.nodes[i]
-				break
-			}
-		}
-		if node == nil {
-			return a.tunRunning, fmt.Errorf("no node selected")
-		}
-
-		// 热待机命中：sing-box 与虚拟网卡仍在线且出站节点未变 —— 重铺路由即可
-		if a.tunWarm && a.tunCmd != nil && a.tunIfaceIdx != 0 && tunNodeMatches(a.tunWarmNode, *node) {
-			// 与内核模式互斥：先停内核、还原系统代理
-			a.tunReplacedCore = a.coreRunning
-			if a.coreRunning {
-				a.stopCoreLocked()
-				a.coreRunning = false
-				if a.systemProxy {
-					setWindowsSystemProxy(false, "")
-					a.systemProxy = false
-				}
-			}
-			hostRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx)
-			if rtErr == nil {
-				a.tunHostRoutes = hostRoutes
-				addTunIPv6Route(a.tunIfaceIdx)
-				a.tunRunning = true
-				a.addLogInternal("info", fmt.Sprintf("TUN resumed from warm standby | %d bypass routes | node: %s", nRouted, node.Name))
-				a.savePersisted()
-				tray.requestRebuild()
-				return a.tunRunning, nil
-			}
-			a.addLogInternal("warn", fmt.Sprintf("Warm standby resume failed (%v), falling back to cold start", rtErr))
-			a.stopTunLocked()
-		}
-
-		// 冷启动：完整重建 sing-box 与虚拟网卡（首次开启 / 节点变更后）
-		a.tunReplacedCore = a.coreRunning
-		if a.coreRunning {
-			a.stopCoreLocked()
-			a.coreRunning = false
-			if a.systemProxy {
-				setWindowsSystemProxy(false, "")
-				a.systemProxy = false
-			}
-			a.addLogInternal("info", "Core proxy stopped, switching to TUN mode")
-		}
-		if err := a.startTunLocked(false); err != nil {
-			a.tunRunning = false
-			a.addLogInternal("error", fmt.Sprintf("TUN start failed: %v", err))
-			a.savePersisted()
-			return false, err
-		}
-	} else {
-		// 软停止：撤路由进热待机（sing-box 与网卡常驻，下次开启秒级恢复）
-		a.warmStopTunLocked()
-		// TUN 开启前内核与系统代理在跑：断开 TUN 后恢复常规代理模式，
-		// 避免用户点一下托盘开关就落得「什么都没连」的状态
-		if a.tunReplacedCore && !a.coreRunning {
-			if err := a.startCoreLocked(); err != nil {
-				a.addLogInternal("warn", fmt.Sprintf("Core proxy not restored after TUN stop: %v", err))
-			} else {
-				a.coreRunning = true
-				server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
-				if err := setWindowsSystemProxy(true, server); err != nil {
-					a.addLogInternal("error", fmt.Sprintf("Failed to re-enable system proxy after TUN stop: %v", err))
-				} else {
-					a.systemProxy = true
-				}
-				a.addLogInternal("info", fmt.Sprintf("TUN stopped, core proxy restored -> %s", server))
-			}
-		}
-		a.tunReplacedCore = false
 	}
-	a.savePersisted()
-	tray.requestRebuild()
-	return a.tunRunning, nil
+	if node == nil {
+		return false, fmt.Errorf("no node selected")
+	}
+	if !(a.tunWarm && a.tunCmd != nil && a.tunIfaceIdx != 0 && tunNodeMatches(a.tunWarmNode, *node)) {
+		return false, fmt.Errorf("no usable warm standby")
+	}
+	hostRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx, a.routingMode)
+	if rtErr != nil {
+		return false, rtErr
+	}
+	a.tunHostRoutes = hostRoutes
+	addTunIPv6Route(a.tunIfaceIdx)
+	a.tunRunning = true
+	a.addLogInternal("info", fmt.Sprintf("TUN resumed from warm standby | %d split routes | policy: %s | node: %s",
+		nRouted, a.routingMode, node.Name))
+	return true, nil
 }
 
 // tunTrafficSample 通过 Windows IP Helper 采样 TUN 网卡流量（简易/全局模式下的真实速率）

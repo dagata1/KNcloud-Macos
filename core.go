@@ -134,7 +134,13 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	}
 
 	var rules []ruleObj
-	switch a.routingMode {
+	// proxy-cn / sstap 规则文件的分流发生在路由表层（TUN），到达 Xray 的流量
+	// 本来就是应代理的部分 —— 对 Xray 而言等同于 global。
+	effectiveMode := a.routingMode
+	if effectiveMode == "proxy-cn" || strings.HasPrefix(effectiveMode, "sstap:") {
+		effectiveMode = "global"
+	}
+	switch effectiveMode {
 	case "global":
 		rules = append(rules, adsBlockRule(), ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "proxy"})
 	case "direct":

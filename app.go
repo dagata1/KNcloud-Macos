@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,6 +125,7 @@ type App struct {
 	tunReplacedCore bool             // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
 	tunWarm         bool             // sing-box 与虚拟网卡热待机（TUN 软停止后保留，重开秒级生效）
 	tunWarmNode     NodeItem         // 热待机中 sing-box 出站使用的节点（变更后需冷启动重建）
+	tap             *tapForwarder    // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
 	tunSampleUp    int64
 	tunSampleDown  int64
 	account        AccountInfo
@@ -359,10 +362,11 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 	}
 
 	a.addLogInternal("info", fmt.Sprintf("Primary route switched to node: [%s] %s (%s:%d)", selected.Protocol, selected.Name, selected.Address, selected.Port))
+	// 合并架构：TUN 出站走本机 Xray，与节点解耦 —— 换节点只需重铺 /32 防回环路由
 	if a.tunRunning {
-		if err := a.startTunLocked(false); err != nil {
-			a.tunRunning = false
-			a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after node switch: %v", err))
+		if err := a.tunReapplyRoutesLocked(); err != nil {
+			a.tunSoftStopLocked()
+			a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after node switch: %v", err))
 		}
 	}
 	if a.coreRunning {
@@ -456,11 +460,11 @@ func (a *App) UpdateNode(node NodeItem) error {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node edit: %v", err))
 		}
 	}
-	// 编辑的是当前活动节点且 TUN 运行中 → 用新参数重启 TUN（否则旧进程仍按原节点/原配置转发）
+	// 编辑的是当前活动节点且 TUN 运行中 → 重铺 /32 防回环路由（协议栈与网卡不动）
 	if old.Active && a.tunRunning {
-		if err := a.startTunLocked(false); err != nil {
-			a.tunRunning = false
-			a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after node edit: %v", err))
+		if err := a.tunReapplyRoutesLocked(); err != nil {
+			a.tunSoftStopLocked()
+			a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after node edit: %v", err))
 		}
 	}
 	a.savePersisted()
@@ -494,15 +498,15 @@ func (a *App) DeleteNode(id string) error {
 			a.coreRunning = false
 			a.addLogInternal("warn", "Active node deleted, core stopped; select a node and start again")
 		}
-		// TUN 还挂在被删节点上：有其它节点则切到新选中的节点继续跑，没有就停掉
+		// TUN 还挂在被删节点上：有其它节点则重铺路由继续跑，没有就软停止
 		if a.tunRunning {
 			if len(a.nodes) > 0 {
-				if err := a.startTunLocked(false); err != nil {
-					a.tunRunning = false
-					a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after active node deletion: %v", err))
+				if err := a.tunReapplyRoutesLocked(); err != nil {
+					a.tunSoftStopLocked()
+					a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after active node deletion: %v", err))
 				}
 			} else {
-				a.stopTunLocked()
+				a.tunSoftStopLocked()
 				a.addLogInternal("warn", "Active node deleted and no nodes left, TUN stopped")
 			}
 		}
@@ -614,10 +618,7 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 	defer a.mu.Unlock()
 
 	if start {
-		// TUN 全局模式与内核模式互斥：软停止进热待机（网卡常驻，切回 TUN 秒级生效）
-		if a.tunRunning {
-			a.warmStopTunLocked()
-		}
+		// 合并架构：TUN 运行时内核是代理大脑，本就不应停 —— 直接确保内核在线即可
 		if err := a.startCoreLocked(); err != nil {
 			a.coreRunning = false
 			a.addLogInternal("error", fmt.Sprintf("Core start failed: %v", err))
@@ -628,7 +629,13 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 		if a.systemProxy {
 			setWindowsSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort))
 		}
-	} else {
+	}
+	if !start {
+		// 内核是 TUN 的代理大脑：停内核前先软停止 TUN（常驻网卡保留）
+		if a.tunRunning {
+			a.tunSoftStopLocked()
+			a.addLogInternal("warn", "TUN soft-stopped along with core")
+		}
 		a.stopCoreLocked()
 		a.coreRunning = false
 		a.lastUpSpeed = "0 B/s"
@@ -666,17 +673,37 @@ func (a *App) SetRoutingMode(mode string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if mode != "bypass-cn" && mode != "global" && mode != "direct" {
+	// 合法策略：内置三种 + SSTap 规则文件（sstap:<rules 文件路径>）
+	valid := mode == "bypass-cn" || mode == "global" || mode == "direct" || mode == "proxy-cn" ||
+		strings.HasPrefix(mode, "sstap:")
+	if !valid {
 		mode = "bypass-cn"
 	}
 	a.routingMode = mode
 	modeLabel := "绕过大陆 (GFWList & CN)"
-	if mode == "global" {
+	switch {
+	case mode == "global":
 		modeLabel = "全局代理"
-	} else if mode == "direct" {
+	case mode == "direct":
 		modeLabel = "全局直连"
+	case mode == "proxy-cn":
+		modeLabel = "仅代理国内 (China-IP-only)"
+	case strings.HasPrefix(mode, "sstap:"):
+		modeLabel = "SSTap 规则: " + filepath.Base(strings.TrimPrefix(mode, "sstap:"))
 	}
 	a.addLogInternal("info", fmt.Sprintf("Routing mode changed to: %s", modeLabel))
+
+	// TUN 运行中：常驻网卡不动，按新策略重铺分流路由（秒级生效）
+	if a.tunRunning {
+		if err := a.tunReapplyRoutesLocked(); err != nil {
+			a.tunSoftStopLocked()
+			a.addLogInternal("error", fmt.Sprintf("TUN re-route after policy change failed: %v", err))
+		}
+		a.savePersisted()
+		tray.requestRebuild()
+		return true
+	}
+
 	if a.coreRunning {
 		if err := a.startCoreLocked(); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after routing change: %v", err))
@@ -788,11 +815,11 @@ func (a *App) refreshSubscription(id string) error {
 				a.addLogInternal("info", "Active node replaced by subscription refresh, core restarted")
 			}
 		}
-		// TUN 运行中且活动节点被替换 → 用新节点参数重启 TUN
+		// TUN 运行中且活动节点被替换 → 重铺 /32 防回环路由（协议栈与网卡不动）
 		if a.tunRunning {
-			if err := a.startTunLocked(false); err != nil {
-				a.tunRunning = false
-				a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after subscription update: %v", err))
+			if err := a.tunReapplyRoutesLocked(); err != nil {
+				a.tunSoftStopLocked()
+				a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after subscription update: %v", err))
 			}
 		}
 	}
@@ -939,7 +966,8 @@ func (a *App) cleanup() {
 	}
 	a.stopWebLogin()
 	a.stopCoreLocked()
-	a.stopTunLocked()
+	// tapstack：停转发 + 撤路由；常驻网卡保留在系统里（与 SSTap 的 TAP 一致）
+	a.tunSoftStopLocked()
 	a.savePersisted()
 }
 

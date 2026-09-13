@@ -7,6 +7,7 @@ require (
 	github.com/wailsapp/wails/v2 v2.15.0
 	github.com/xtls/xray-core v1.8.24
 	golang.org/x/sys v0.46.0
+	gvisor.dev/gvisor v0.0.0-20231202080848-1f7806d17489
 )
 
 require (
@@ -74,7 +75,6 @@ require (
 	google.golang.org/grpc v1.66.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	gvisor.dev/gvisor v0.0.0-20231202080848-1f7806d17489 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
 
