@@ -52,6 +52,7 @@ import {
   GetCoreStatus,
   ToggleCore,
   SetRoutingMode,
+  SimpleConnect,
   GetSubscriptions,
   UpdateNode,
   ImportNodesFromLinks,
@@ -154,6 +155,7 @@ export default function App() {
   const [loginBusy, setLoginBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [webLoginWaiting, setWebLoginWaiting] = useState(false); // 网页授权登录等待中
+  const [tunBusy, setTunBusy] = useState(false); // TUN 模式切换进行中
 
   const fmtGB = (b) => {
     if (!b || b <= 0) return '0 GB';
@@ -406,6 +408,19 @@ export default function App() {
     }
     checkSimpleNode();
   }, [uiMode, status.routingMode, simpleActiveId]);
+
+  // TUN 模式开关（虚拟网卡接管全部流量，与内核代理互斥；后端会自动停/恢复内核与系统代理）
+  const handleToggleTun = async (on) => {
+    if (tunBusy) return;
+    setTunBusy(true);
+    try {
+      await SimpleConnect(on);
+    } catch (e) {
+      showToast(String(e?.message || e).replace(/^.*?: /, ''), 'error');
+    }
+    setStatus(await GetCoreStatus());
+    setTunBusy(false);
+  };
 
   const handleRoutingChange = async (mode) => {
     await SetRoutingMode(mode);
@@ -879,10 +894,14 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Routing policy radio */}
+                {/* Routing policy radio + TUN mode switch */}
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
                   <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>分流策略</span>
-                  <div className="segmented-control">
+                  <div
+                    className="segmented-control"
+                    style={status.tunnelMode || tunBusy ? { opacity: 0.45, pointerEvents: 'none' } : null}
+                    title={status.tunnelMode ? 'TUN 模式接管中，关闭 TUN 后可切换分流策略' : ''}
+                  >
                     <button
                       className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
                       onClick={() => handleRoutingChange('bypass-cn')}
@@ -901,6 +920,23 @@ export default function App() {
                     >
                       全局直连
                     </button>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>TUN 模式</div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                        {status.tunnelMode ? '虚拟网卡接管全部流量 · 大陆直连' : '虚拟网卡接管全部流量（需管理员）'}
+                      </div>
+                    </div>
+                    <label className="win11-toggle" title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
+                      <input
+                        type="checkbox"
+                        checked={!!status.tunnelMode}
+                        disabled={tunBusy}
+                        onChange={e => handleToggleTun(e.target.checked)}
+                      />
+                      <span className="toggle-track"><span className="toggle-thumb" /></span>
+                    </label>
                   </div>
                 </div>
               </div>
