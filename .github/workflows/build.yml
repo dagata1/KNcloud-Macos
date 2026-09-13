@@ -10,6 +10,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # Create Release 步骤需要写权限（默认只读会 403）
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -18,13 +21,13 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install Wails CLI
         shell: bash
