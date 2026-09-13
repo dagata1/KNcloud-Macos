@@ -458,6 +458,13 @@ export default function App() {
   // Filtered nodes
   const filteredNodes = nodes;
 
+  // 仪表盘推荐节点：按真连接延迟排序（已测速升序 → 超时 → 未测速垫底），取前 3 个
+  const quickPickNodes = [...nodes].sort((a, b) => {
+    const rank = (d) => (d > 0 ? 0 : d === -2 ? 1 : 2);
+    if (rank(a.delay) !== rank(b.delay)) return rank(a.delay) - rank(b.delay);
+    return rank(a.delay) === 0 ? a.delay - b.delay : 0;
+  });
+
   // ---------------- 登录页（未登录且未跳过时显示） ----------------
   if (account && !account.loggedIn) {
     return (
@@ -855,7 +862,7 @@ export default function App() {
                   </button>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-                  {nodes.slice(0, 3).map(node => (
+                  {quickPickNodes.slice(0, 3).map(node => (
                     <div
                       key={node.id}
                       onClick={() => handleSelectNode(node.id)}
