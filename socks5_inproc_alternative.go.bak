@@ -1,0 +1,163 @@
+package main
+
+// SSTap 方案的最小 SOCKS5 客户端：TCP CONNECT + UDP ASSOCIATE。
+// 用户态协议栈（tun.go）终结的 TCP/UDP 流量全部经此转交本地 Xray SOCKS5 入站，
+// 分流（geoip:cn 直连 / 广告拦截 / 全局代理）由 Xray 路由层完成。
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"time"
+)
+
+var errSocks5Handshake = errors.New("socks5 handshake failed")
+
+const socks5DialTimeout = 5 * time.Second
+
+// socks5Handshake 无认证握手
+func socks5Handshake(conn net.Conn) error {
+	conn.SetDeadline(time.Now().Add(socks5DialTimeout))
+	defer conn.SetDeadline(time.Time{})
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return err
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return err
+	}
+	if resp[0] != 0x05 || resp[1] != 0x00 {
+		return errSocks5Handshake
+	}
+	return nil
+}
+
+// socks5Request 发起 CONNECT(cmd=1)/UDP ASSOCIATE(cmd=3) 请求（IPv4 目标），
+// 返回应答中的绑定地址与端口。
+func socks5Request(conn net.Conn, cmd byte, ip net.IP, port uint16) (net.IP, uint16, error) {
+	req := make([]byte, 10)
+	req[0], req[1], req[2], req[3] = 0x05, cmd, 0x00, 0x01
+	ip4 := ip.To4()
+	if ip4 == nil {
+		ip4 = net.IPv4zero.To4()
+	}
+	copy(req[4:8], ip4)
+	binary.BigEndian.PutUint16(req[8:10], port)
+	if _, err := conn.Write(req); err != nil {
+		return nil, 0, err
+	}
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(conn, head); err != nil {
+		return nil, 0, err
+	}
+	if head[0] != 0x05 || head[1] != 0x00 {
+		return nil, 0, fmt.Errorf("socks5 reply code=%d", head[1])
+	}
+	switch head[3] {
+	case 0x01:
+		b := make([]byte, 6)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return nil, 0, err
+		}
+		return net.IP(b[:4]), binary.BigEndian.Uint16(b[4:6]), nil
+	case 0x04:
+		b := make([]byte, 18)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return nil, 0, err
+		}
+		return net.IP(b[:16]), binary.BigEndian.Uint16(b[16:18]), nil
+	case 0x03:
+		dl := make([]byte, 1)
+		if _, err := io.ReadFull(conn, dl); err != nil {
+			return nil, 0, err
+		}
+		b := make([]byte, int(dl[0])+2)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return nil, 0, err
+		}
+		return net.ParseIP("127.0.0.1"), binary.BigEndian.Uint16(b[len(b)-2:]), nil
+	default:
+		return nil, 0, fmt.Errorf("socks5 bad ATYP=%d", head[3])
+	}
+}
+
+// socks5DialTCP 通过本地 SOCKS5 代理建立到 dest 的 TCP 连接
+func socks5DialTCP(proxyAddr string, destIP net.IP, destPort uint16) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", proxyAddr, socks5DialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := socks5Handshake(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if _, _, err := socks5Request(conn, 0x01, destIP, destPort); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// socksUDPRelay 一条 UDP ASSOCIATE 关联：ctrl 需保持打开直至 flow 结束
+type socksUDPRelay struct {
+	ctrl net.Conn
+	pc   *net.UDPConn
+}
+
+// socks5DialUDP 建立一条 UDP ASSOCIATE，返回可收发封装数据报的已连接 UDP socket
+func socks5DialUDP(proxyAddr string) (*socksUDPRelay, error) {
+	ctrl, err := net.DialTimeout("tcp", proxyAddr, socks5DialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := socks5Handshake(ctrl); err != nil {
+		ctrl.Close()
+		return nil, err
+	}
+	// Xray 会以 127.0.0.1 上的中继端口应答
+	bndIP, bndPort, err := socks5Request(ctrl, 0x03, net.IPv4zero, 0)
+	if err != nil {
+		ctrl.Close()
+		return nil, err
+	}
+	if bndIP == nil || bndIP.IsUnspecified() {
+		bndIP = net.IPv4(127, 0, 0, 1)
+	}
+	pc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: bndIP, Port: int(bndPort)})
+	if err != nil {
+		ctrl.Close()
+		return nil, err
+	}
+	return &socksUDPRelay{ctrl: ctrl, pc: pc}, nil
+}
+
+// send 按 SOCKS5 UDP 封装格式发出一包（RSV/FRAG/ATYP=IPv4 + 目标 + 载荷）
+func (r *socksUDPRelay) send(destIP net.IP, destPort uint16, payload []byte) error {
+	buf := make([]byte, 10+len(payload))
+	binary.BigEndian.PutUint16(buf[2:4], 0) // FRAG=0
+	buf[3] = 0x01
+	copy(buf[4:8], destIP.To4())
+	binary.BigEndian.PutUint16(buf[8:10], destPort)
+	copy(buf[10:], payload)
+	_, err := r.pc.Write(buf)
+	return err
+}
+
+func (r *socksUDPRelay) recv(buf []byte) (int, error) {
+	n, err := r.pc.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+	// 去掉 SOCKS5 UDP 头（至少 10 字节，ATYP=1）
+	if n < 10 || buf[3] != 0x01 {
+		return 0, nil
+	}
+	return n - 10, nil
+}
+
+func (r *socksUDPRelay) close() {
+	r.pc.Close()
+	r.ctrl.Close()
+}

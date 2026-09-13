@@ -1,0 +1,6 @@
+build/bin
+node_modules
+frontend/dist
+/KNcloud.exe
+/KNcloud-WIN.exe
+.workbuddy-ai/

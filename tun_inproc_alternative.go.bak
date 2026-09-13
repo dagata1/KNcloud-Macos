@@ -1,0 +1,611 @@
+// 备选方案（未启用）：进程内 SSTap 复现——wintun + gvisor 用户态协议栈 + 本地 SOCKS5 转发。
+//
+// 与当前启用的方案（tun.go：sing-box 子进程 + SSTap 式静态分流路由）的区别：
+//   - 完全无子进程：虚拟网卡、协议栈、转发全部在本进程内，无孤儿进程/残留设备问题
+//   - 全局接管：0.0.0.0/1 + 128.0.0.0/1 两条路由（局域网 /24 不受影响），
+//     分流交给 Xray 路由层（sniffing + geoip:cn direct），DNS 查询同样进栈经 Xray 分流
+//   - 依赖：golang.zx2c4.com/wireguard/tun（wintun）、gvisor.dev/gvisor（均已在 go.sum）
+//
+// 启用方法：
+//   1. mv socks5_inproc_alternative.go.bak socks5.go
+//   2. mv tun_inproc_alternative.go.bak tun.go（覆盖现有 tun.go）
+//   3. go get golang.zx2c4.com/wireguard gvisor.dev/gvisor && go mod tidy
+//   4. App 结构体调整：tunCmd *exec.Cmd / tunIfaceIdx 替换为 tunLayer *tunStack、
+//      新增 tunSendThrough string（Xray 出站绑定物理网卡防回环）；
+//      startTunLocked 无参；SimpleConnect/stopTunLocked/beforeClose/统计采样按文中注释接线
+//
+// 已知取舍：仅接管 IPv4（与 SSTap 一致）；ping 不通外网（ICMP 不经代理，SSTap 同）；
+// Hysteria2 节点在简易模式下不可用（Xray 不支持）；需 x/sys/wireguard/gvisor 三个依赖。
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+	"golang.zx2c4.com/wireguard/tun"
+
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/waiter"
+)
+
+const (
+	// 虚拟网卡参数（与 SSTap 同款 1500 MTU，兼容性最好）
+	sstapIfaceName = "KNcloud"
+	sstapIfaceIP   = "172.19.0.1"
+	sstapIfaceMask = "255.255.255.252"
+	sstapMTU       = 1500
+	tunNicID       = tcpip.NICID(1)
+)
+
+var (
+	modiphlpapi      = windows.NewLazySystemDLL("iphlpapi.dll")
+	procGetBestRoute = modiphlpapi.NewProc("GetBestRoute")
+)
+
+// mibIPForwardRow 对应 Windows MIB_IPFORWARDROW（GetBestRoute 出参）
+type mibIPForwardRow struct {
+	ForwardDest, ForwardMask, ForwardPolicy, ForwardNextHop uint32
+	ForwardIfIndex, ForwardType, ForwardProto, ForwardAge   uint32
+	ForwardNextHopAS                                        uint32
+	ForwardMetric1, ForwardMetric2, ForwardMetric3          uint32
+	ForwardMetric4, ForwardMetric5                          uint32
+}
+
+// defaultRouteIPv4 查询当前默认路由所在物理网卡及其 IPv4 地址（必须在加 TUN 路由前调用）
+func defaultRouteIPv4() (string, int, error) {
+	var row mibIPForwardRow
+	r1, _, _ := procGetBestRoute.Call(0, 0, uintptr(unsafe.Pointer(&row)))
+	if r1 != 0 {
+		return "", 0, fmt.Errorf("GetBestRoute 失败 (code=%d)", r1)
+	}
+	idx := int(row.ForwardIfIndex)
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", 0, err
+	}
+	for _, ifc := range ifaces {
+		if ifc.Index != idx {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, addr := range addrs {
+			if ipn, ok := addr.(*net.IPNet); ok {
+				if v4 := ipn.IP.To4(); v4 != nil {
+					return v4.String(), idx, nil
+				}
+			}
+		}
+	}
+	return "", 0, fmt.Errorf("默认路由网卡 (index=%d) 未找到 IPv4 地址", idx)
+}
+
+func hiddenCmd(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	return cmd
+}
+
+// addGlobalRoutes SSTap 式全局路由：0.0.0.0/1 + 128.0.0.0/1 经虚拟网卡
+func addGlobalRoutes(ifIndex int) error {
+	ifIdx := strconv.Itoa(ifIndex)
+	for _, dest := range []string{"0.0.0.0", "128.0.0.0"} {
+		cmd := hiddenCmd("route", "add", dest, "mask", "128.0.0.0", sstapIfaceIP, "metric", "1", "if", ifIdx)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("route add %s/1 失败: %v: %s", dest, err, bytes.TrimSpace(out))
+		}
+	}
+	return nil
+}
+
+func removeGlobalRoutes() {
+	for _, dest := range []string{"0.0.0.0", "128.0.0.0"} {
+		_ = hiddenCmd("route", "delete", dest, "mask", "128.0.0.0").Run()
+	}
+}
+
+// configureAdapter 等待虚拟网卡就绪并配置静态 IP，返回接口索引
+func configureAdapter(name string) (int, error) {
+	deadline := time.Now().Add(15 * time.Second)
+	ifIndex := 0
+	for {
+		if ifc, err := net.InterfaceByName(name); err == nil {
+			ifIndex = ifc.Index
+			break
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("虚拟网卡 %s 未就绪", name)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		cmd := hiddenCmd("netsh", "interface", "ip", "set", "address", "name="+name,
+			"static", sstapIfaceIP, sstapIfaceMask)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return ifIndex, nil
+		}
+		lastErr = fmt.Errorf("netsh 配置失败: %v: %s", err, bytes.TrimSpace(out))
+		time.Sleep(500 * time.Millisecond)
+	}
+	return 0, lastErr
+}
+
+// ------------------------- 用户态协议栈 -------------------------
+
+// tunStack 封装 wintun 设备 + gvisor 用户态协议栈
+type tunStack struct {
+	dev        tun.Device
+	linkEP     *channel.Endpoint
+	stk        *stack.Stack
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	socksProxy string
+
+	mu    sync.Mutex
+	conns map[io.Closer]struct{} // 活跃的代理连接（停止时统一关闭）
+}
+
+func newTunStack(dev tun.Device, socksPort int) (*tunStack, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &tunStack{
+		dev:        dev,
+		socksProxy: fmt.Sprintf("127.0.0.1:%d", socksPort),
+		ctx:        ctx,
+		cancel:     cancel,
+		conns:      make(map[io.Closer]struct{}),
+	}
+
+	t.linkEP = channel.New(1024, sstapMTU, "")
+	t.stk = stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+	})
+	if err := t.stk.CreateNIC(tunNicID, t.linkEP); err != nil {
+		cancel()
+		return nil, fmt.Errorf("netstack 创建网卡失败: %v", err)
+	}
+	t.stk.AddAddress(tunNicID, ipv4.ProtocolNumber, tcpip.AddrFrom4([4]byte{172, 19, 0, 1}))
+	// 混杂模式：任意目的 IP 的包都交给本地传输层（wildcard forwarder 终结）
+	t.stk.SetPromiscuousMode(tunNicID, true)
+	t.stk.SetRouteTable([]tcpip.Route{{Destination: header.IPv4Any, NIC: tunNicID}})
+
+	tcpFwd := tcp.NewForwarder(t.stk, 0, 65536, t.handleTCP)
+	udpFwd := udp.NewForwarder(t.stk, t.handleUDP)
+	t.stk.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+	t.stk.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+
+	t.wg.Add(2)
+	go t.readLoop()
+	go t.writeLoop()
+	return t, nil
+}
+
+// readLoop wintun → netstack
+func (t *tunStack) readLoop() {
+	defer t.wg.Done()
+	bufs := make([][]byte, t.dev.BatchSize())
+	sizes := make([]int, len(bufs))
+	for i := range bufs {
+		bufs[i] = make([]byte, sstapMTU)
+	}
+	for {
+		n, err := t.dev.Read(bufs, sizes, 0)
+		if err != nil {
+			return
+		}
+		for i := 0; i < n; i++ {
+			pkt := bufs[i][:sizes[i]]
+			if len(pkt) == 0 || pkt[0]>>4 != 4 {
+				continue // 仅接管 IPv4（与 SSTap 行为一致，IPv6 走原路）
+			}
+			var payload buffer.Buffer
+			payload.Append(buffer.NewViewWithData(append([]byte(nil), pkt...)))
+			p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: payload})
+			t.linkEP.InjectInbound(ipv4.ProtocolNumber, p)
+		}
+	}
+}
+
+// writeLoop netstack → wintun
+func (t *tunStack) writeLoop() {
+	defer t.wg.Done()
+	for {
+		pkt := t.linkEP.ReadContext(t.ctx)
+		if pkt == nil || pkt.IsNil() {
+			return
+		}
+		data := pkt.ToBuffer().Flatten()
+		if len(data) > 0 {
+			_, _ = t.dev.Write([][]byte{data}, 0)
+		}
+		pkt.DecRef()
+	}
+}
+
+func (t *tunStack) track(c io.Closer) {
+	t.mu.Lock()
+	t.conns[c] = struct{}{}
+	t.mu.Unlock()
+}
+
+func (t *tunStack) untrack(c io.Closer) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
+}
+
+// close 停止协议栈并移除虚拟网卡
+func (t *tunStack) close() {
+	t.cancel()
+	t.mu.Lock()
+	for c := range t.conns {
+		_ = c.Close()
+	}
+	t.conns = make(map[io.Closer]struct{})
+	t.mu.Unlock()
+
+	t.stk.Close()    // 关闭全部传输端点与 forwarder
+	t.linkEP.Close() // 丢弃出站队列残留
+	t.dev.Close()    // 移除 wintun 设备（Windows 会连带删除其路由）
+	t.wg.Wait()
+}
+
+// ------------------------- TCP 转发 -------------------------
+
+// handleTCP 终结发往任意 IP 的 TCP 连接并经 SOCKS5 转发。
+// 先 CreateEndpoint 完成三次握手（客户端立即收到 SYN-ACK），再后台拨代理。
+func (t *tunStack) handleTCP(req *tcp.ForwarderRequest) {
+	id := req.ID()
+	go func() {
+		var wq waiter.Queue
+		ep, err := req.CreateEndpoint(&wq)
+		if err != nil {
+			req.Complete(true) // 通知 RST
+			return
+		}
+		req.Complete(false)
+
+		destIP := net.IP(id.LocalAddress.AsSlice())
+		conn, err := socks5DialTCP(t.socksProxy, destIP, id.LocalPort)
+		if err != nil {
+			ep.Close()
+			return
+		}
+		t.track(conn)
+		t.relayTCP(ep, &wq, conn)
+		t.untrack(conn)
+	}()
+}
+
+// relayTCP ep <-> conn 双向搬运
+func (t *tunStack) relayTCP(ep tcpip.Endpoint, wq *waiter.Queue, conn net.Conn) {
+	defer conn.Close()
+	defer ep.Close()
+
+	// 方向一：netstack → SOCKS5
+	upDone := make(chan struct{})
+	go func() {
+		defer close(upDone)
+		entry, ch := waiter.NewChannelEntry(waiter.ReadableEvents)
+		wq.EventRegister(&entry)
+		defer wq.EventUnregister(&entry)
+		var dst bytes.Buffer
+		for {
+			dst.Reset()
+			res, err := ep.Read(&dst, tcpip.ReadOptions{})
+			if err != nil {
+				if err == tcpip.ErrWouldBlock {
+					select {
+					case <-ch:
+						continue
+					case <-t.ctx.Done():
+						return
+					}
+				}
+				return // ErrClosedForRead / 连接被重置等
+			}
+			if res.Count > 0 {
+				if _, err := conn.Write(dst.Bytes()); err != nil {
+					return
+				}
+			}
+			if res.EndOfRecord {
+				// 对端发来 FIN → 向代理侧半关闭，继续回流剩余数据
+				if tc, ok := conn.(*net.TCPConn); ok {
+					_ = tc.CloseWrite()
+				}
+			}
+		}
+	}()
+
+	// 方向二：SOCKS5 → netstack
+	entry, ch := waiter.NewChannelEntry(waiter.WritableEvents)
+	wq.EventRegister(&entry)
+	defer wq.EventUnregister(&entry)
+	buf := make([]byte, 64*1024)
+	for {
+		n, rerr := conn.Read(buf)
+		if n > 0 {
+			reader := bytes.NewReader(buf[:n])
+			for reader.Len() > 0 {
+				_, werr := ep.Write(reader, tcpip.WriteOptions{})
+				if werr == nil {
+					continue
+				}
+				if werr == tcpip.ErrWouldBlock {
+					select {
+					case <-ch:
+						continue
+					case <-t.ctx.Done():
+						return
+					}
+				}
+				return // RST 等 → 双向终止
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				// 代理侧 FIN → 优雅地通知客户端
+				_ = ep.Shutdown(tcpip.ShutdownWrite)
+				select {
+				case <-upDone: // 等反向数据排空
+				case <-t.ctx.Done():
+				}
+			}
+			return
+		}
+	}
+}
+
+// ------------------------- UDP 转发 -------------------------
+
+// handleUDP 终结发往任意 IP 的 UDP 流（含 DNS）并经 SOCKS5 UDP ASSOCIATE 转发
+func (t *tunStack) handleUDP(req *udp.ForwarderRequest) {
+	id := req.ID()
+	go func() {
+		var wq waiter.Queue
+		ep, err := req.CreateEndpoint(&wq)
+		if err != nil {
+			return
+		}
+		defer ep.Close()
+
+		destIP := net.IP(id.LocalAddress.AsSlice())
+		destPort := id.LocalPort
+		srcAddr := tcpip.FullAddress{NIC: tunNicID, Addr: id.RemoteAddress, Port: id.RemotePort}
+
+		relay, err := socks5DialUDP(t.socksProxy)
+		if err != nil {
+			return
+		}
+		t.track(relay)
+		defer t.untrack(relay)
+		defer relay.close()
+
+		// 空闲回收：90s 无流量自动关闭该 flow（DNS/QUIC 均为短流）
+		var idleMu sync.Mutex
+		var lastActive = time.Now().UnixNano()
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.ctx.Done():
+					ep.Close()
+					relay.close()
+					return
+				case <-ticker.C:
+					idleMu.Lock()
+					idle := time.Since(time.Unix(0, lastActive))
+					idleMu.Unlock()
+					if idle > 90*time.Second {
+						ep.Close()
+						relay.close()
+						return
+					}
+				}
+			}
+		}()
+		touch := func() {
+			idleMu.Lock()
+			lastActive = time.Now().UnixNano()
+			idleMu.Unlock()
+		}
+
+		// 方向一：SOCKS5 → netstack
+		go func() {
+			buf := make([]byte, 65535)
+			for {
+				n, err := relay.recv(buf)
+				if n > 0 {
+					touch()
+					if _, werr := ep.Write(bytes.NewReader(buf[10:10+n]), tcpip.WriteOptions{To: &srcAddr}); werr != nil {
+						return
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		// 方向二：netstack → SOCKS5
+		entry, ch := waiter.NewChannelEntry(waiter.ReadableEvents)
+		wq.EventRegister(&entry)
+		defer wq.EventUnregister(&entry)
+		var dst bytes.Buffer
+		for {
+			dst.Reset()
+			res, err := ep.Read(&dst, tcpip.ReadOptions{})
+			if err != nil {
+				if err == tcpip.ErrWouldBlock {
+					select {
+					case <-ch:
+						continue
+					case <-t.ctx.Done():
+						return
+					}
+				}
+				return
+			}
+			if res.Count > 0 {
+				touch()
+				if err := relay.send(destIP, destPort, dst.Bytes()); err != nil {
+					return
+				}
+			}
+		}
+	}()
+}
+
+// ------------------------- 生命周期 -------------------------
+
+// startTunLocked 启动 SSTap 方案全局代理（调用方需持有写锁）
+func (a *App) startTunLocked() error {
+	a.stopTunLocked()
+
+	// 清理旧版 sing-box 方案的残留（升级兼容，保留一段时间）
+	if killCmd := hiddenCmd("taskkill", "/IM", "sing-box.exe", "/F"); killCmd != nil {
+		_ = killCmd.Run()
+	}
+	removeResidualWintunDevices()
+
+	var node *NodeItem
+	for i := range a.nodes {
+		if a.nodes[i].Active {
+			node = &a.nodes[i]
+			break
+		}
+	}
+	if node == nil {
+		return fmt.Errorf("未选择任何节点")
+	}
+
+	// 1. TUN 路由生效前，先探测默认路由所在物理网卡（供 Xray 出站绑定）
+	physIP, _, err := defaultRouteIPv4()
+	if err != nil {
+		return fmt.Errorf("探测物理网卡失败: %w", err)
+	}
+
+	// 2. 启动 Xray 内核（SOCKS5 入站），出站绑定物理网卡源 IP 防止回环
+	a.tunSendThrough = physIP
+	if err := a.startCoreLocked(); err != nil {
+		a.tunSendThrough = ""
+		return fmt.Errorf("内核启动失败: %w", err)
+	}
+	a.coreRunning = true
+
+	// 3. 进程内创建 wintun 虚拟网卡（无子进程，强杀残留由下次启动清理兜底）
+	dev, err := tun.CreateTUN(sstapIfaceName, sstapMTU)
+	if err != nil {
+		a.stopCoreLocked()
+		a.coreRunning = false
+		a.tunSendThrough = ""
+		return fmt.Errorf("创建虚拟网卡失败: %w", err)
+	}
+	devName, _ := dev.Name()
+
+	// 4. 配置网卡 IP
+	ifIndex, err := configureAdapter(devName)
+	if err != nil {
+		dev.Close()
+		a.stopCoreLocked()
+		a.coreRunning = false
+		a.tunSendThrough = ""
+		return err
+	}
+
+	// 5. 启动用户态协议栈
+	ts, err := newTunStack(dev, a.settings.SocksPort)
+	if err != nil {
+		dev.Close()
+		a.stopCoreLocked()
+		a.coreRunning = false
+		a.tunSendThrough = ""
+		return err
+	}
+
+	// 6. 最后加全局路由（此时转发链路已就绪，黑洞窗口最小化）
+	if err := addGlobalRoutes(ifIndex); err != nil {
+		ts.close()
+		a.stopCoreLocked()
+		a.coreRunning = false
+		a.tunSendThrough = ""
+		return err
+	}
+
+	a.tunLayer = ts
+	a.tunRunning = true
+	a.addLogInternal("info", fmt.Sprintf("TUN global proxy started (SSTap mode, in-process) | iface: %s (%s/%s) | node: %s",
+		devName, sstapIfaceIP, sstapIfaceMask, node.Name))
+	return nil
+}
+
+// stopTunLocked 停止全局代理（调用方需持有写锁）
+func (a *App) stopTunLocked() {
+	if a.tunLayer != nil {
+		removeGlobalRoutes()
+		a.tunLayer.close()
+		a.tunLayer = nil
+	}
+	if a.tunRunning || a.tunSendThrough != "" {
+		a.tunSendThrough = ""
+		a.stopCoreLocked()
+		a.coreRunning = false
+		a.tunRunning = false
+		a.addLogInternal("info", "TUN global proxy stopped, all traffic back to direct")
+	}
+}
+
+// SimpleConnect 简易模式一键连接/断开：SSTap 方案真全局代理（与内核代理模式互斥）
+func (a *App) SimpleConnect(start bool) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if start {
+		if !isElevated() {
+			a.addLogInternal("error", "TUN mode requires administrator privileges")
+			return a.tunRunning, fmt.Errorf("真全局代理需要以管理员身份运行 KNcloud（右键 → 以管理员身份运行）")
+		}
+		// 系统代理与 TUN 互斥
+		if a.systemProxy {
+			setWindowsSystemProxy(false, "")
+			a.systemProxy = false
+		}
+		if err := a.startTunLocked(); err != nil {
+			a.tunRunning = false
+			a.addLogInternal("error", fmt.Sprintf("TUN start failed: %v", err))
+			a.savePersisted()
+			return false, err
+		}
+	} else {
+		a.stopTunLocked()
+	}
+	a.savePersisted()
+	return a.tunRunning, nil
+}
