@@ -89,7 +89,7 @@ export default function App() {
   const [theme, setTheme] = useState('dark');
   const brandLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
   const loginLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
-  const [uiMode, setUiMode] = useState('classic'); // classic=普通模式, simple=简易模式
+  const [uiMode, setUiMode] = useState('simple'); // classic=普通模式, simple=简易模式（登录后默认简洁）
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   
@@ -304,6 +304,9 @@ export default function App() {
       setLoginForm({ email: '', password: '' });
       setSubscriptions(await GetSubscriptions());
       setNodes(await GetNodes());
+      // 登录成功默认进入简洁模式（窗口同步切到紧凑尺寸）
+      setUiMode('simple');
+      applyWindowSize('simple');
     } catch (e) {
       setLoginErr(String(e?.message || e).replace(/^.*?: /, ''));
     }
@@ -319,6 +322,9 @@ export default function App() {
         setSubscriptions(await GetSubscriptions());
         setNodes(await GetNodes());
       } catch (e) { /* ignore */ }
+      // 登录成功默认进入简洁模式（窗口同步切到紧凑尺寸）
+      setUiMode('simple');
+      applyWindowSize('simple');
       showToast('网页登录成功，订阅已同步', 'success');
     });
     const offErr = EventsOn('kncloud:web-login-error', (msg) => {
@@ -443,6 +449,45 @@ export default function App() {
     setNodes(updatedNodes);
   };
 
+  // Ctrl+R：真连接测速当前选中的节点（节点列表里 active 的那个）。
+  // PingNode 在后端起临时内核经节点真实请求，耗时较长，用 ref 防止重复触发。
+  const pingingActiveRef = useRef(false);
+  const handlePingActiveNode = async () => {
+    if (pingingActiveRef.current) return;
+    const cur = nodes.find(n => n.active);
+    if (!cur) {
+      showToast('未选择节点，无法测速', 'error');
+      return;
+    }
+    pingingActiveRef.current = true;
+    showToast(`正在真连接测速「${cur.name}」…`);
+    try {
+      await PingNode(cur.id);
+      const updated = await GetNodes();
+      setNodes(updated);
+      const n = updated.find(x => x.id === cur.id);
+      if (n && n.delay > 0) {
+        showToast(`「${n.name}」测速完成：${n.delay} ms`, 'success');
+      } else {
+        showToast(`「${cur.name}」测速超时或失败`, 'error');
+      }
+    } catch (e) {
+      showToast('测速失败：' + (e?.message || e), 'error');
+    }
+    pingingActiveRef.current = false;
+  };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault(); // 拦截 WebView 默认的 Ctrl+R 刷新页面
+        handlePingActiveNode();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   const handlePingAll = async () => {
     setIsPingingAll(true);
     const res = await PingAllNodes();
@@ -535,6 +580,11 @@ export default function App() {
     return rank(a.delay) === 0 ? a.delay - b.delay : 0;
   });
 
+  // 登录页与简洁模式同尺寸（420x640）；登录成功后由模式切换逻辑控制窗口
+  useEffect(() => {
+    if (account && !account.loggedIn) applyWindowSize('simple');
+  }, [account && account.loggedIn]);
+
   // ---------------- 登录页（未登录且未跳过时显示） ----------------
   if (account && !account.loggedIn) {
     return (
@@ -572,11 +622,8 @@ export default function App() {
           <div className="login-divider"><span>或</span></div>
           <button className="win11-btn login-btn" disabled={loginBusy || webLoginWaiting} onClick={handleWebLogin}>
             <Globe size={14} />
-            <span>跳转网页登录</span>
+            <span>{webLoginWaiting ? '等待网页授权…' : '通过网站登录'}</span>
           </button>
-          {webLoginWaiting && (
-            <div className="login-waiting">已在系统浏览器打开 KNcloud 官网，登录并授权后将自动返回本客户端</div>
-          )}
         </div>
       </div>
     );
@@ -1048,10 +1095,10 @@ export default function App() {
               <div className="content-header" style={{ marginBottom: '8px' }}>
                 <div>
                   <h1 className="content-title">服务器节点</h1>
-                  <p className="content-subtitle">查看、测速与切换代理服务器节点</p>
+                  <p className="content-subtitle">查看、测速与切换代理服务器节点（Ctrl+R 真连接测速当前节点）</p>
                 </div>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button className="win11-btn" onClick={handlePingAll} disabled={isPingingAll}>
+                  <button className="win11-btn" onClick={handlePingAll} disabled={isPingingAll} title="Ctrl+R 可单独测速当前选中的节点">
                     <Zap size={14} />
                     <span>全部真连接测速</span>
                   </button>
@@ -1097,9 +1144,6 @@ export default function App() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
                           <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>{node.name}</strong>
-                          <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'rgba(128,128,128,0.12)', padding: '1px 6px', borderRadius: '3px' }}>
-                            {node.group}
-                          </span>
                         </div>
                         <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                           {node.address}:{node.port} · 安全: {node.security} · 传输: {node.network}
@@ -1375,9 +1419,25 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Group 4: 系统托盘 */}
+              {/* Group 4: 系统托盘与开机启动 */}
               <div className="win11-card" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                <h3 style={{ fontSize: '14px', fontWeight: 600 }}>系统托盘</h3>
+                <h3 style={{ fontSize: '14px', fontWeight: 600 }}>系统托盘与开机启动</h3>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>开机自动启动</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      登录 Windows 后自动启动 KNcloud-WIN，方便随时接管代理
+                    </div>
+                  </div>
+                  <label className="win11-toggle">
+                    <input
+                      type="checkbox"
+                      checked={!!settings.autoStart}
+                      onChange={e => setLocalSettings({ ...settings, autoStart: e.target.checked })}
+                    />
+                    <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  </label>
+                </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <div style={{ fontSize: '13px', fontWeight: 500 }}>关闭窗口时最小化到托盘</div>
