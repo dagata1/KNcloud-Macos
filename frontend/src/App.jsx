@@ -102,6 +102,8 @@ export default function App() {
   });
 
   const [nodes, setNodes] = useState([]);
+  // 简易模式连接检测结果：idle=未连接, checking=检测中, ok=节点可用, fail=节点无效
+  const [simpleNet, setSimpleNet] = useState('idle');
   const [selectedProto, setSelectedProto] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [isPingingAll, setIsPingingAll] = useState(false);
@@ -272,6 +274,8 @@ export default function App() {
   //   点击连接 = 绕过大陆（海外走代理、大陆直连）；点击断开 = 全局直连
   const handleSimpleConnect = async () => {
     const next = status.routingMode === 'bypass-cn' ? 'direct' : 'bypass-cn';
+    // 连接动作一发出就进入「正在连接…」，检测结果由下面的自动检测更新
+    setSimpleNet(next === 'bypass-cn' ? 'checking' : 'idle');
     try {
       await SetRoutingMode(next);
     } catch (e) {
@@ -363,6 +367,37 @@ export default function App() {
     setNodes(await GetNodes());
     setStatus(await GetCoreStatus());
   };
+
+  // 简易模式节点可用性自动检测：PingNode 在后端起临时内核，经该节点真实请求
+  // 探测 URL，结果（delay > 0 可用 / -2 失败）同时回写到节点列表的延迟显示
+  const checkSimpleNode = async () => {
+    const cur = nodes.find(n => n.active);
+    if (!cur) {
+      setSimpleNet('fail');
+      return;
+    }
+    setSimpleNet('checking');
+    try {
+      await PingNode(cur.id);
+      const updated = await GetNodes();
+      setNodes(updated);
+      const n = updated.find(x => x.id === cur.id);
+      setSimpleNet(n && n.delay > 0 ? 'ok' : 'fail');
+    } catch (e) {
+      setSimpleNet('fail');
+    }
+  };
+
+  // 代理开启时自动检测当前节点；切换节点 / 断开后重新检测或复位
+  const simpleActiveId = nodes.find(n => n.active)?.id;
+  useEffect(() => {
+    if (uiMode !== 'simple') return;
+    if ((status.routingMode || 'bypass-cn') === 'direct') {
+      setSimpleNet('idle');
+      return;
+    }
+    checkSimpleNode();
+  }, [uiMode, status.routingMode, simpleActiveId]);
 
   const handleRoutingChange = async (mode) => {
     await SetRoutingMode(mode);
@@ -530,7 +565,6 @@ export default function App() {
     // 简易模式的状态完全由分流策略决定（不再依赖 TUN 是否运行）
     const routing = status.routingMode || 'bypass-cn';
     const simpleOn = routing === 'bypass-cn';
-    const routingLabel = routing === 'global' ? '全局代理' : routing === 'direct' ? '全局直连' : '绕过大陆';
     return (
       <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
         <header className="titlebar drag-region">
@@ -566,7 +600,18 @@ export default function App() {
             <Power size={56} />
           </button>
 
-          <div className="simple-status-text">{simpleOn ? '分流代理中' : routingLabel}</div>
+          <div
+            className="simple-status-text"
+            style={simpleNet === 'fail' ? { color: '#ff6b6b' } : (simpleOn && simpleNet === 'ok' ? { color: '#3fbf6f' } : null)}
+          >
+            {!simpleOn
+              ? '开始连接'
+              : simpleNet === 'checking'
+                ? '正在连接…'
+                : simpleNet === 'fail'
+                  ? '连接失败，请更换节点'
+                  : '链接成功'}
+          </div>
 
           <div className="simple-speed">
             <span>↑ {status.upSpeed}</span>
@@ -606,7 +651,19 @@ export default function App() {
                 <span>已用 {fmtGB(account.usedUp + account.usedDown)} / {account.transferEnable > 0 ? fmtGB(account.transferEnable) : '无限'}</span>
                 <span>{account.expire}</span>
               </div>
-              <button className="login-skip" onClick={handleLogout}>退出登录</button>
+              <div className="simple-account-actions">
+                <button className="win11-btn" onClick={handleUpdateSubscription} disabled={syncing}>
+                  <RefreshCw size={13} className={syncing ? 'spin' : ''} />
+                  <span>{syncing ? '更新中…' : '更新订阅'}</span>
+                </button>
+                <button className="win11-btn" onClick={handlePingAll} disabled={isPingingAll}>
+                  <Gauge size={13} />
+                  <span>{isPingingAll ? '测速中…' : '测试节点'}</span>
+                </button>
+                <button className="win11-btn danger" onClick={handleLogout}>
+                  <span>退出登录</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
