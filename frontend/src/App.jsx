@@ -548,13 +548,6 @@ export default function App() {
           </button>
 
           <div className="simple-status-text">{simpleOn ? '分流代理中' : routingLabel}</div>
-          <div className="simple-status-sub">
-            {simpleOn
-              ? `正在通过「${status.activeNodeName}」代理（绕过大陆 · 大陆直连）`
-              : routing === 'global'
-                ? '所有流量经代理转发 · 点击上方按钮切回绕过大陆'
-                : '所有流量直连 · 点击上方按钮开启分流代理'}
-          </div>
 
           <div className="simple-speed">
             <span>↑ {status.upSpeed}</span>
@@ -597,11 +590,6 @@ export default function App() {
               <button className="login-skip" onClick={handleLogout}>退出登录</button>
             </div>
           )}
-
-          <div className="simple-footer">
-            简易模式 = 一键切换分流策略（绕过大陆 / 全局直连），内核与系统代理随程序自动开启 ·
-            点击右上角图标切换到普通模式（订阅 / 路由 / 完整设置）
-          </div>
         </div>
       </div>
     );
