@@ -601,7 +601,7 @@ export default function App() {
         {renderToasts()}
         <div className="simple-body">
           <button
-            className={`simple-power-btn ${simpleOn ? 'connected' : ''}`}
+            className={`simple-power-btn ${simpleOn && (simpleNet === 'ok' || simpleNet === 'checking') ? 'connected' : ''} ${simpleOn && simpleNet === 'fail' ? 'failed' : ''}`}
             onClick={handleSimpleConnect}
             title={simpleOn ? '点击切换到全局直连' : '点击开启分流代理（绕过大陆）'}
           >

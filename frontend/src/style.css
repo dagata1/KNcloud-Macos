@@ -656,6 +656,18 @@ select.win11-input option {
   box-shadow: 0 0 46px rgba(16, 124, 65, 0.35);
 }
 
+.simple-power-btn.failed {
+  border-color: #ff6b6b;
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.1);
+  box-shadow: 0 0 46px rgba(255, 107, 107, 0.3);
+}
+
+.simple-power-btn.failed:hover {
+  border-color: #ff6b6b;
+  color: #ff6b6b;
+}
+
 .simple-status-text {
   font-size: 22px;
   font-weight: 700;
