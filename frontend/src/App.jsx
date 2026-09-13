@@ -701,7 +701,12 @@ export default function App() {
         {renderToasts()}
         <div className="simple-body">
           <button
-            className={`simple-power-btn ${simpleOn && (simpleNet === 'ok' || simpleNet === 'checking') ? 'connected' : ''} ${simpleOn && simpleNet === 'fail' ? 'failed' : ''}`}
+            className={[
+              'simple-power-btn',
+              simpleOn && simpleNet === 'ok' ? 'connected' : '',
+              simpleOn && simpleNet === 'checking' ? 'connecting' : '',
+              simpleOn && simpleNet === 'fail' ? 'failed' : '',
+            ].filter(Boolean).join(' ')}
             onClick={handleSimpleConnect}
             title={simpleOn ? '点击切换到全局直连' : '点击开启分流代理（绕过大陆）'}
           >
@@ -711,7 +716,7 @@ export default function App() {
           </button>
 
           <div
-            className="simple-status-text"
+            className={`simple-status-text ${simpleOn && simpleNet === 'checking' ? 'checking' : ''}`}
             style={simpleNet === 'fail' ? { color: '#ff6b6b' } : (simpleOn && simpleNet === 'ok' ? { color: '#3fbf6f' } : null)}
           >
             {!simpleOn

@@ -654,6 +654,44 @@ select.win11-input option {
   color: #107c41;
   background: rgba(16, 124, 65, 0.12);
   box-shadow: 0 0 46px rgba(16, 124, 65, 0.35);
+  animation: simple-pop 0.35s ease;
+}
+
+/* 连接成功瞬间的弹跳（connected class 挂上时播放一次） */
+@keyframes simple-pop {
+  0% { transform: scale(0.92); }
+  55% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+/* 连接中：主题色呼吸光晕 + 外圈旋转扫描光环 */
+.simple-power-btn.connecting {
+  position: relative;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-subtle);
+  animation: simple-breathe 1.6s ease-in-out infinite;
+}
+
+.simple-power-btn.connecting::after {
+  content: '';
+  position: absolute;
+  inset: -11px;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  border-top-color: var(--accent);
+  border-right-color: var(--accent);
+  opacity: 0.85;
+  animation: simple-spin 0.9s linear infinite;
+}
+
+@keyframes simple-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes simple-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-subtle); }
+  50% { box-shadow: 0 0 48px 6px var(--accent-subtle); }
 }
 
 .simple-power-btn.failed {
@@ -661,6 +699,15 @@ select.win11-input option {
   color: #ff6b6b;
   background: rgba(255, 107, 107, 0.1);
   box-shadow: 0 0 46px rgba(255, 107, 107, 0.3);
+  animation: simple-shake 0.45s ease;
+}
+
+@keyframes simple-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-9px); }
+  40% { transform: translateX(9px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
 }
 
 .simple-power-btn.failed:hover {
@@ -673,6 +720,16 @@ select.win11-input option {
   font-weight: 700;
   color: var(--text-primary);
   margin-top: 4px;
+}
+
+/* 连接中状态文字呼吸闪烁 */
+.simple-status-text.checking {
+  animation: status-blink 1.2s ease-in-out infinite;
+}
+
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 .simple-status-sub {
