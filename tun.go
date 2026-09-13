@@ -914,6 +914,8 @@ func (a *App) startTunLocked(isRetry bool) error {
 	a.tunHostRoutes = hostRoutes
 
 	a.tunRunning = true
+	a.tunWarmNode = *node // 记录热待机对应的出站节点，供软停止后的快速恢复比对
+	a.tunWarm = false
 	// IPv6 防泄漏：2000::/3 送进 TUN。失败不阻断启动（IPv4 分流不受影响），仅告警
 	v6OK := addTunIPv6Route(ifIdx) == nil
 	if !v6OK {
@@ -926,6 +928,39 @@ func (a *App) startTunLocked(isRetry bool) error {
 	a.addLogInternal("info", fmt.Sprintf("TUN interface %s ready | %d bypass routes + IPv6 leak protection (%v) | egress: %s | CN direct, others proxied | node: %s",
 		tunIfaceName, nRouted, v6OK, bindInfo, node.Name))
 	return nil
+}
+
+// warmStopTunLocked 软停止：撤除分流路由与 DNS 劫持，但保留 sing-box 进程与
+// 虚拟网卡常驻待机 —— 再次开启 TUN 时无需重建网卡，秒级生效（调用方需持有写锁）。
+func (a *App) warmStopTunLocked() {
+	wasRunning := a.tunRunning
+
+	// 1) 回收物理网卡上的节点 /32 直连路由
+	if n := removeHostRoutes(&a.tunHostRoutes); n > 0 && wasRunning {
+		a.addLogInternal("info", fmt.Sprintf("Removed %d node host routes", n))
+	}
+
+	// 2) 清空 TUN 网卡上的分流路由与 DNS（网卡保留，tunIfaceIdx 不复位，热恢复直接复用）
+	if idx := a.tunIfaceIdx; idx != 0 {
+		if n := deleteRoutesOnInterface(idx); n > 0 && wasRunning {
+			a.addLogInternal("info", fmt.Sprintf("Removed %d split routes", n))
+		}
+		removeTunIPv6Route(idx)
+		c := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", idx))
+		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+		_ = c.Run()
+	}
+
+	if a.tunRunning {
+		a.tunRunning = false
+	}
+	if a.tunCmd != nil {
+		a.tunWarm = true
+		a.addLogInternal("info", "TUN stopped (adapter kept in warm standby, next start is instant)")
+	} else {
+		a.tunWarm = false
+	}
 }
 
 // stopTunLocked 停止 TUN 子进程并回收路由/DNS（调用方需持有写锁）。
@@ -975,6 +1010,8 @@ func (a *App) stopTunLocked() {
 		a.addLogInternal("info", "TUN stopped, all traffic back to direct")
 	}
 	a.tunRunning = false
+	a.tunWarm = false
+	a.tunWarmNode = NodeItem{}
 }
 
 // indexFoldASCII 在 s 中查找 ASCII 子串 sub（大小写不敏感），返回字节下标；找不到返回 -1。
@@ -1126,7 +1163,15 @@ func removeResidualWintunDevices() (removed, remaining int) {
 	return removed, remaining
 }
 
-// SimpleConnect 简易模式一键连接/断开：SSTap 方案分流全局代理（与内核代理模式互斥）
+// tunNodeMatches 判断热待机的 sing-box 出站节点与目标节点是否一致
+// （配置在启动时烧录，节点变了必须冷启动重建）。
+func tunNodeMatches(a, b NodeItem) bool {
+	return a.Protocol == b.Protocol && a.Address == b.Address && a.Port == b.Port && a.UUID == b.UUID
+}
+
+// SimpleConnect 简易模式一键连接/断开：SSTap 方案分流全局代理（与内核代理模式互斥）。
+// 关闭时 sing-box 与虚拟网卡进入热待机（仅撤路由，进程与网卡常驻），
+// 再次开启且节点未变时只需重铺路由，秒级生效；节点变了才冷启动重建。
 func (a *App) SimpleConnect(start bool) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1136,8 +1181,45 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			a.addLogInternal("error", "TUN mode requires administrator privileges")
 			return a.tunRunning, fmt.Errorf("TUN global proxy requires administrator privileges")
 		}
-		// 与 Xray 内核模式互斥：先停内核、还原系统代理，并记住 TUN 开启前的状态
-		// （断开 TUN 时只恢复确实存在过的东西，不凭空替用户开代理）
+
+		var node *NodeItem
+		for i := range a.nodes {
+			if a.nodes[i].Active {
+				node = &a.nodes[i]
+				break
+			}
+		}
+		if node == nil {
+			return a.tunRunning, fmt.Errorf("no node selected")
+		}
+
+		// 热待机命中：sing-box 与虚拟网卡仍在线且出站节点未变 —— 重铺路由即可
+		if a.tunWarm && a.tunCmd != nil && a.tunIfaceIdx != 0 && tunNodeMatches(a.tunWarmNode, *node) {
+			// 与内核模式互斥：先停内核、还原系统代理
+			a.tunReplacedCore = a.coreRunning
+			if a.coreRunning {
+				a.stopCoreLocked()
+				a.coreRunning = false
+				if a.systemProxy {
+					setWindowsSystemProxy(false, "")
+					a.systemProxy = false
+				}
+			}
+			hostRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx)
+			if rtErr == nil {
+				a.tunHostRoutes = hostRoutes
+				addTunIPv6Route(a.tunIfaceIdx)
+				a.tunRunning = true
+				a.addLogInternal("info", fmt.Sprintf("TUN resumed from warm standby | %d bypass routes | node: %s", nRouted, node.Name))
+				a.savePersisted()
+				tray.requestRebuild()
+				return a.tunRunning, nil
+			}
+			a.addLogInternal("warn", fmt.Sprintf("Warm standby resume failed (%v), falling back to cold start", rtErr))
+			a.stopTunLocked()
+		}
+
+		// 冷启动：完整重建 sing-box 与虚拟网卡（首次开启 / 节点变更后）
 		a.tunReplacedCore = a.coreRunning
 		if a.coreRunning {
 			a.stopCoreLocked()
@@ -1155,7 +1237,8 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			return false, err
 		}
 	} else {
-		a.stopTunLocked()
+		// 软停止：撤路由进热待机（sing-box 与网卡常驻，下次开启秒级恢复）
+		a.warmStopTunLocked()
 		// TUN 开启前内核与系统代理在跑：断开 TUN 后恢复常规代理模式，
 		// 避免用户点一下托盘开关就落得「什么都没连」的状态
 		if a.tunReplacedCore && !a.coreRunning {

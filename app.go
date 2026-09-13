@@ -121,6 +121,8 @@ type App struct {
 	tunProcDone    chan struct{}     // sing-box 进程退出信号
 	tunHostRoutes  []mibIPForwardRow // 写入物理网卡的节点 /32 直连路由（断开时回收）
 	tunReplacedCore bool             // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
+	tunWarm         bool             // sing-box 与虚拟网卡热待机（TUN 软停止后保留，重开秒级生效）
+	tunWarmNode     NodeItem         // 热待机中 sing-box 出站使用的节点（变更后需冷启动重建）
 	tunSampleUp    int64
 	tunSampleDown  int64
 	account        AccountInfo
@@ -612,9 +614,9 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 	defer a.mu.Unlock()
 
 	if start {
-		// TUN 全局模式与内核模式互斥
+		// TUN 全局模式与内核模式互斥：软停止进热待机（网卡常驻，切回 TUN 秒级生效）
 		if a.tunRunning {
-			a.stopTunLocked()
+			a.warmStopTunLocked()
 		}
 		if err := a.startCoreLocked(); err != nil {
 			a.coreRunning = false

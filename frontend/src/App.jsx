@@ -160,6 +160,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [webLoginWaiting, setWebLoginWaiting] = useState(false); // 网页授权登录等待中
   const [tunBusy, setTunBusy] = useState(false); // TUN 模式切换进行中
+  const [tunPending, setTunPending] = useState(null); // 'on'/'off'：点击后的即时反馈，完成前显示进行中文案
 
   const fmtGB = (b) => {
     if (!b || b <= 0) return '0 GB';
@@ -420,15 +421,18 @@ export default function App() {
   }, [uiMode, status.routingMode, simpleActiveId]);
 
   // TUN 模式开关（虚拟网卡接管全部流量，与内核代理互斥；后端会自动停/恢复内核与系统代理）
+  // SimpleConnect 是同步完成整套启停的（数秒），先立即切换开关并显示进行中文案，完成后落到真实状态
   const handleToggleTun = async (on) => {
     if (tunBusy) return;
     setTunBusy(true);
+    setTunPending(on ? 'on' : 'off');
     try {
       await SimpleConnect(on);
     } catch (e) {
       showToast(String(e?.message || e).replace(/^.*?: /, ''), 'error');
     }
     setStatus(await GetCoreStatus());
+    setTunPending(null);
     setTunBusy(false);
   };
 
@@ -979,7 +983,7 @@ export default function App() {
                     <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>分流策略</span>
                     <div
                       className="segmented-control"
-                      style={status.tunnelMode || tunBusy ? { opacity: 0.45, pointerEvents: 'none' } : null}
+                      style={status.tunnelMode || tunBusy || !!tunPending ? { opacity: 0.45, pointerEvents: 'none' } : null}
                       title={status.tunnelMode ? 'TUN 模式接管中，关闭 TUN 后可切换分流策略' : ''}
                     >
                       <button
@@ -1009,12 +1013,18 @@ export default function App() {
                     <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>TUN 模式</span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                        {status.tunnelMode ? '虚拟网卡接管全部流量 · 大陆直连' : '虚拟网卡接管全部流量（需管理员）'}
+                        {tunPending === 'on'
+                          ? '正在启动 TUN…'
+                          : tunPending === 'off'
+                            ? '正在关闭 TUN…'
+                            : status.tunnelMode
+                              ? '虚拟网卡接管全部流量 · 大陆直连'
+                              : '虚拟网卡接管全部流量（需管理员）'}
                       </span>
                       <label className="win11-toggle" title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
                         <input
                           type="checkbox"
-                          checked={!!status.tunnelMode}
+                          checked={tunPending ? tunPending === 'on' : !!status.tunnelMode}
                           disabled={tunBusy}
                           onChange={e => handleToggleTun(e.target.checked)}
                         />
