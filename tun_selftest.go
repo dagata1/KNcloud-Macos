@@ -11,6 +11,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -51,6 +53,16 @@ func runTunSelfTest(a *App) int {
 		fail++
 	} else {
 		fmt.Printf("[ OK ] 8.8.8.8 routed via TUN (ifIdx=%d gw=%v mask=%08x)\n", r.IfIndex, dwordToIP(r.NextHop), r.Mask)
+	}
+
+	// 1b) IPv6 防泄漏：2000::/3 必须已写入 TUN 网卡（旧版路由 API 不支持 v6，用 PowerShell 校验）
+	v6Out, v6Err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("if (Get-NetRoute -DestinationPrefix '2000::/3' -InterfaceIndex %d -ErrorAction SilentlyContinue) { 'OK' } else { 'MISSING' }", idx)).CombinedOutput()
+	if v6Err != nil || strings.Contains(string(v6Out), "MISSING") {
+		fmt.Printf("[FAIL] IPv6 split route 2000::/3 via TUN: err=%v out=%s\n", v6Err, strings.TrimSpace(string(v6Out)))
+		fail++
+	} else {
+		fmt.Printf("[ OK ] IPv6 split route 2000::/3 via TUN (leak protection on)\n")
 	}
 
 	// 2) DNS 劫持链路：系统解析器 → 劫持 DNS → sing-box 分流 → 代理查询

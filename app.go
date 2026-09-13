@@ -120,6 +120,7 @@ type App struct {
 	tunJob         windows.Handle    // sing-box 所在 KILL_ON_JOB_CLOSE Job
 	tunProcDone    chan struct{}     // sing-box 进程退出信号
 	tunHostRoutes  []mibIPForwardRow // 写入物理网卡的节点 /32 直连路由（断开时回收）
+	tunReplacedCore bool             // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
 	tunSampleUp    int64
 	tunSampleDown  int64
 	account        AccountInfo
@@ -131,7 +132,7 @@ func NewApp() *App {
 		coreRunning:  false,
 		systemProxy:  getWindowsSystemProxy(),
 		routingMode:  "bypass-cn",
-		activeNodeID: "node-1",
+		activeNodeID: "",
 		settings: AppSettings{
 			Theme:      "dark",
 			UiMode:     "classic",
@@ -145,26 +146,8 @@ func NewApp() *App {
 
 			MinimizeToTray: true,
 		},
-		nodes: []NodeItem{
-			{
-				ID: "node-1", Name: "香港 01 | IEPL 专线 [高速]", Protocol: "VLESS",
-				Address: "hk01.cloudnode.net", Port: 443, UUID: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-				Security: "tls", Network: "grpc", Delay: -1, Active: true,
-				Group: "内置示例", Upload: "-", Download: "-",
-			},
-			{
-				ID: "node-2", Name: "日本东京 01 | 软银 SoftBank 原生", Protocol: "Trojan",
-				Address: "jp01.edgeglobal.io", Port: 443, UUID: "trojan-pwd-9381-sec",
-				Security: "tls", Network: "tcp", Delay: -1, Active: false,
-				Group: "内置示例", Upload: "-", Download: "-",
-			},
-			{
-				ID: "node-3", Name: "美国洛杉矶 01 | Anycast 4K解封", Protocol: "Hysteria2",
-				Address: "us01.anycast-fast.org", Port: 24433, UUID: "hy2-auth-key-837189",
-				Security: "tls", Network: "udp", Delay: -1, Active: false,
-				Group: "内置示例", Upload: "-", Download: "-",
-			},
-		},
+		nodes:         []NodeItem{},
+		subscriptions: []SubscriptionItem{},
 		lastUpSpeed:   "0 B/s",
 		lastDownSpeed: "0 B/s",
 	}
@@ -175,7 +158,35 @@ func NewApp() *App {
 	if loaded {
 		app.addLogInternal("info", "KNcloud-WIN restored local configuration from disk")
 	} else {
-		app.addLogInternal("info", "KNcloud-WIN first run: loaded 3 built-in sample nodes (removable)")
+		app.addLogInternal("info", "KNcloud-WIN first run: empty node list, add nodes or sync a subscription to start")
+		app.savePersisted()
+	}
+	// 历史版本首次运行会写入 3 个「内置示例」演示节点（假节点，不可用）。
+	// 只按本程序自己的分组标记清理，不碰用户自建或订阅来的节点。
+	removedSamples := 0
+	activeRemoved := false
+	var kept []NodeItem
+	for _, n := range app.nodes {
+		if n.Group == "内置示例" {
+			activeRemoved = activeRemoved || n.Active
+			removedSamples++
+			continue
+		}
+		kept = append(kept, n)
+	}
+	if removedSamples > 0 {
+		app.nodes = kept
+		if activeRemoved {
+			app.activeNodeID = ""
+			for i := range app.nodes {
+				app.nodes[i].Active = false
+			}
+			if len(app.nodes) > 0 {
+				app.nodes[0].Active = true
+				app.activeNodeID = app.nodes[0].ID
+			}
+		}
+		app.addLogInternal("info", fmt.Sprintf("Removed %d built-in sample node(s) left by a previous version", removedSamples))
 		app.savePersisted()
 	}
 	app.addLogInternal("info", fmt.Sprintf("Core component Xray-core %s loaded", xrayCoreVersion()))
@@ -435,6 +446,13 @@ func (a *App) UpdateNode(node NodeItem) error {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node edit: %v", err))
 		}
 	}
+	// 编辑的是当前活动节点且 TUN 运行中 → 用新参数重启 TUN（否则旧进程仍按原节点/原配置转发）
+	if old.Active && a.tunRunning {
+		if err := a.startTunLocked(false); err != nil {
+			a.tunRunning = false
+			a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after node edit: %v", err))
+		}
+	}
 	a.savePersisted()
 	tray.requestRebuild()
 	return nil
@@ -465,6 +483,18 @@ func (a *App) DeleteNode(id string) error {
 			a.stopCoreLocked()
 			a.coreRunning = false
 			a.addLogInternal("warn", "Active node deleted, core stopped; select a node and start again")
+		}
+		// TUN 还挂在被删节点上：有其它节点则切到新选中的节点继续跑，没有就停掉
+		if a.tunRunning {
+			if len(a.nodes) > 0 {
+				if err := a.startTunLocked(false); err != nil {
+					a.tunRunning = false
+					a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after active node deletion: %v", err))
+				}
+			} else {
+				a.stopTunLocked()
+				a.addLogInternal("warn", "Active node deleted and no nodes left, TUN stopped")
+			}
 		}
 	}
 	a.addLogInternal("warn", fmt.Sprintf("Node removed (ID: %s)", id))
@@ -746,6 +776,13 @@ func (a *App) refreshSubscription(id string) error {
 				a.coreRunning = false
 			} else {
 				a.addLogInternal("info", "Active node replaced by subscription refresh, core restarted")
+			}
+		}
+		// TUN 运行中且活动节点被替换 → 用新节点参数重启 TUN
+		if a.tunRunning {
+			if err := a.startTunLocked(false); err != nil {
+				a.tunRunning = false
+				a.addLogInternal("error", fmt.Sprintf("Failed to restart TUN after subscription update: %v", err))
 			}
 		}
 	}

@@ -233,7 +233,7 @@ func (t *trayController) buildMenu() {
 	miProxy := systray.AddMenuItemCheckbox("系统代理", "开启 / 关闭 Windows 系统代理", systemProxy)
 	miProxy.Click(func() { go a.trayToggleSystemProxy() })
 
-	miTun := systray.AddMenuItemCheckbox("TUN 全局模式", "虚拟网卡接管全部流量（需管理员权限）", tunRunning)
+	miTun := systray.AddMenuItemCheckbox("TUN 模式", "虚拟网卡接管全部流量：大陆直连、海外走代理，含 IPv6 防泄漏（需管理员权限）", tunRunning)
 	miTun.Click(func() { go a.trayToggleTun() })
 
 	miAuto := systray.AddMenuItemCheckbox("开机自启", "登录 Windows 后自动启动 KNcloud-WIN", autoStart)

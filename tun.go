@@ -40,11 +40,12 @@ const (
 	createNoWindow = 0x08000000
 
 	// SSTap 方案核心参数（复刻 SSTap-beta 的 TAP 分流机制）
-	tunIfaceName = "KNcloud-TAP" // 固定虚拟网卡名（对应 SSTAP 1）
-	tunGateway   = "172.19.0.1"  // 虚拟网卡网关地址（/30）
-	tunDnsAddr   = "198.18.0.2"  // 写入虚拟网卡的系统 DNS，端口 53 被 sing-box 劫持
-	tunMetric    = 1             // 虚拟网卡接口 metric（对应 SSTap 抢占 DNS 优先级）
-	routeMetric  = 5             // 分流路由 metric
+	tunIfaceName = "KNcloud-TAP"          // 固定虚拟网卡名（对应 SSTAP 1）
+	tunGateway   = "172.19.0.1"           // 虚拟网卡网关地址（/30）
+	tunDnsAddr   = "198.18.0.2"           // 写入虚拟网卡的系统 DNS，端口 53 被 sing-box 劫持
+	tunMetric    = 1                      // 虚拟网卡接口 metric（对应 SSTap 抢占 DNS 优先级）
+	routeMetric  = 5                      // 分流路由 metric
+	tunGateway6  = "fdfe:dcba:9876::1"    // 虚拟网卡 IPv6 地址（/126），配合 2000::/3 分流路由堵 IPv6 泄漏
 )
 
 var (
@@ -153,11 +154,13 @@ func buildTunConfigJSON(node NodeItem, srsPath, bindIface string) (string, error
 			"type":           "tun",
 			"tag":            "tun-in",
 			"interface_name": tunIfaceName,
-			"address":        []string{tunGateway + "/30"},
-			"mtu":            9000,
-			"auto_route":     false, // 核心：不劫持默认路由，由本进程手动写入分流路由
-			"strict_route":   false,
-			"stack":          "mixed",
+			// v4 + v6 双栈地址：v6 地址存在才能把 2000::/3 写进该网卡堵 v6 泄漏
+			// （分流路由只覆盖 IPv4，宿主机若有原生 IPv6，所有 v6 流量都会绕过 TUN 直连出网）
+			"address":      []string{tunGateway + "/30", tunGateway6 + "/126"},
+			"mtu":          9000,
+			"auto_route":   false, // 核心：不劫持默认路由，由本进程手动写入分流路由
+			"strict_route": false,
+			"stack":        "mixed",
 		}},
 		"outbounds": []map[string]interface{}{
 			proxyOut,
@@ -363,14 +366,30 @@ func addRouteRow(row *mibIPForwardRow) error {
 	return nil
 }
 
-// addRoute2 便捷封装：目的 CIDR 经指定网卡/网关写入路由
+// interfaceMetric4 读取网卡的 IPv4 interface metric（即 netsh 里的自动跃点）。
+//
+// 关键坑：Vista 之后旧版路由 API 的 MIB_IPFORWARDROW.Metric1 语义变为
+// 「接口 metric + 路由 metric」的合成值（route.exe 的 "metric 1" 落库后
+// 实际是 ifaceMetric+1），CreateIpForwardEntry 传入小于接口 metric 的值
+// 会被 ERROR_INVALID_PARAMETER 拒绝。所以所有写路由的地方都必须把
+// 目标 metric 叠加在本接口的 interface metric 之上。
+func interfaceMetric4(ifIdx uint32) uint32 {
+	row := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: ifIdx}
+	if err := windows.GetIpInterfaceEntry(&row); err != nil {
+		return 0
+	}
+	return row.Metric
+}
+
+// addRoute2 便捷封装：目的 CIDR 经指定网卡/网关写入路由。
+// metric 参数为「路由 metric」，叠加在网卡 interface metric 之上（见 interfaceMetric4）。
 func addRoute2(ifIdx uint32, dst net.IPNet, nextHop net.IP, metric uint32) error {
 	row := mibIPForwardRow{
 		Dest:    ipToDword(dst.IP),
 		Mask:    ipToDword(net.IP(dst.Mask)),
 		NextHop: ipToDword(nextHop),
 		IfIndex: ifIdx,
-		Metric1: metric,
+		Metric1: interfaceMetric4(ifIdx) + metric,
 	}
 	if row.NextHop == 0 {
 		row.Type = ipRouteTypeDirect
@@ -585,7 +604,7 @@ func applySstapRouting(node NodeItem, tunIdx uint32) (hostRoutes []mibIPForwardR
 	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）
 	nodeIPs := lookupNodeIPv4s(node.Address)
 	if len(nodeIPs) == 0 {
-		return nil, 0, fmt.Errorf("failed to resolve node address: %s", node.Address)
+		return nil, 0, fmt.Errorf("failed to resolve IPv4 address of node %s (IPv6-only nodes are not supported in TUN mode)", node.Address)
 	}
 
 	// 1) 网卡 metric 抢到最高 + 系统 DNS 指向劫持地址（等价 SSTap 设置 TAP 适配器 DNS/跃点数）
@@ -620,7 +639,8 @@ func applySstapRouting(node NodeItem, tunIdx uint32) (hostRoutes []mibIPForwardR
 			NextHop: base.NextHop,
 			IfIndex: base.IfIndex,
 			Type:    base.Type,
-			Metric1: 1,
+			// 合成 metric = 物理 NIC 接口 metric + 1（该网卡上最高优先级）
+			Metric1: interfaceMetric4(base.IfIndex) + 1,
 		}
 		if row.Type != ipRouteTypeDirect && row.Type != ipRouteTypeIndirect {
 			if row.NextHop == 0 {
@@ -674,6 +694,30 @@ func removeHostRoutes(routes *[]mibIPForwardRow) int {
 	return n
 }
 
+// addTunIPv6Route 把 IPv6 全局单播 2000::/3 送进虚拟网卡，堵住 IPv6 泄漏。
+// 旧版 IP Helper 路由 API（CreateIpForwardEntry）不支持 IPv6，因此与
+// 网卡 metric/DNS 一样走 PowerShell 的 New-NetRoute（ActiveStore 不持久化，重启自动消失）。
+// 只接管 2000::/3 而不是 ::/0：ULA (fc00::/7) 与链路本地 (fe80::/10) 保持系统原有行为。
+func addTunIPv6Route(ifIdx uint32) error {
+	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("New-NetRoute -InterfaceIndex %d -DestinationPrefix '2000::/3' -NextHop '%s' -RouteMetric %d -PolicyStore ActiveStore -ErrorAction Stop | Out-Null",
+			ifIdx, tunGateway6, routeMetric))
+	ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	if out, err := ps.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// removeTunIPv6Route 回收写入虚拟网卡的 IPv6 分流路由（尽力而为；
+// 网卡销毁时系统也会自动回收，失败静默忽略）
+func removeTunIPv6Route(ifIdx uint32) {
+	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("Remove-NetRoute -InterfaceIndex %d -DestinationPrefix '2000::/3' -Confirm:$false -ErrorAction SilentlyContinue", ifIdx))
+	ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	_ = ps.Run()
+}
+
 // ------------------------- 生命周期 -------------------------
 
 // createKillOnCloseJob 创建关闭即杀进程的 Job Object。
@@ -692,6 +736,17 @@ func createKillOnCloseJob() (windows.Handle, error) {
 		return 0, err
 	}
 	return job, nil
+}
+
+// killOrphanSingBox 只杀掉由本程序释放的那个 sing-box.exe（按可执行文件完整路径匹配），
+// 清理上个实例被强杀时遗留的孤儿进程 —— 它会占住同名 TUN 适配器导致下次启动失败。
+// 不做 taskkill /IM 全量匹配：用户可能同时运行着其它 sing-box 软件（官方客户端等），不能误杀。
+func killOrphanSingBox(exePath string) {
+	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe'\" | Where-Object { $_.ExecutablePath -eq '%s' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }", exePath))
+	ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	_ = ps.Run()
+	time.Sleep(300 * time.Millisecond)
 }
 
 // waitForTunIface 轮询等待虚拟网卡就绪；sing-box 进程退出则立刻报错
@@ -735,12 +790,12 @@ func waitForAdapterGone(timeout time.Duration) {
 func (a *App) startTunLocked(isRetry bool) error {
 	a.stopTunLocked()
 
-	// 清理残留的 sing-box 孤儿进程（上个实例被强杀时可能遗留，会占住同名 TUN 适配器）
-	if killCmd := exec.Command("taskkill", "/IM", "sing-box.exe", "/F"); killCmd != nil {
-		killCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-		_ = killCmd.Run()
-		time.Sleep(300 * time.Millisecond)
+	// 清理本程序遗留的 sing-box 孤儿进程（上个实例被强杀时可能遗留，会占住同名 TUN 适配器）
+	exePath, err := ensureSingBoxBin()
+	if err != nil {
+		return fmt.Errorf("failed to unpack sing-box binary: %w", err)
 	}
+	killOrphanSingBox(exePath)
 	// 删除残留的 wintun 设备实例（kill 无法让 sing-box 自行清理，残留设备会导致同名适配器创建失败）
 	if removed, remaining := removeResidualWintunDevices(); removed > 0 || remaining > 0 {
 		if remaining > 0 {
@@ -751,10 +806,6 @@ func (a *App) startTunLocked(isRetry bool) error {
 	}
 	waitForAdapterGone(5 * time.Second)
 
-	exePath, err := ensureSingBoxBin()
-	if err != nil {
-		return fmt.Errorf("failed to unpack sing-box binary: %w", err)
-	}
 	cfgDir, _ := appConfigDir()
 	// TUN 需要 wintun.dll 才能创建虚拟网卡，必须和 sing-box.exe 放同一目录
 	if _, err := ensureWintunDLL(cfgDir); err != nil {
@@ -838,6 +889,9 @@ func (a *App) startTunLocked(isRetry bool) error {
 			if a.tunRunning {
 				a.tunRunning = false
 				a.addLogInternal("warn", fmt.Sprintf("TUN process exited unexpectedly: %v", waitErr))
+				// sing-box 崩溃后 wintun 适配器随进程销毁（其上分流路由由系统回收），
+				// 但写入物理网卡的节点 /32 直连路由不会自动消失 —— 主动回收防残留
+				a.stopTunLocked()
 			}
 		}
 		a.mu.Unlock()
@@ -860,12 +914,17 @@ func (a *App) startTunLocked(isRetry bool) error {
 	a.tunHostRoutes = hostRoutes
 
 	a.tunRunning = true
+	// IPv6 防泄漏：2000::/3 送进 TUN。失败不阻断启动（IPv4 分流不受影响），仅告警
+	v6OK := addTunIPv6Route(ifIdx) == nil
+	if !v6OK {
+		a.addLogInternal("warn", "IPv6 split route setup failed; IPv6 traffic may bypass the tunnel")
+	}
 	bindInfo := "auto"
 	if bindIface != "" {
 		bindInfo = bindIface
 	}
-	a.addLogInternal("info", fmt.Sprintf("TUN interface %s ready | %d bypass routes active | egress: %s | CN direct, others proxied | node: %s",
-		tunIfaceName, nRouted, bindInfo, node.Name))
+	a.addLogInternal("info", fmt.Sprintf("TUN interface %s ready | %d bypass routes + IPv6 leak protection (%v) | egress: %s | CN direct, others proxied | node: %s",
+		tunIfaceName, nRouted, v6OK, bindInfo, node.Name))
 	return nil
 }
 
@@ -884,6 +943,7 @@ func (a *App) stopTunLocked() {
 		if n := deleteRoutesOnInterface(idx); n > 0 && wasRunning {
 			a.addLogInternal("info", fmt.Sprintf("Removed %d split routes", n))
 		}
+		removeTunIPv6Route(idx)
 		c := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 			fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", idx))
 		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
@@ -949,7 +1009,8 @@ func indexFoldASCII(s, sub string) int {
 // ownWintunDescHints 本程序历史实现创建过的 wintun 适配器描述关键字。
 // 只删除描述命中这些关键字的设备，避免误删 WireGuard / 其它 VPN 的 wintun 适配器：
 //   - "sing-tun"    当前 TUN 方案（内嵌 sing-box）创建的适配器
-//   - "xray tunnel" 早期进程内 Xray TUN 实验（见 tun_inproc_alternative.go.bak）创建的适配器
+//   - "xray tunnel" 早期进程内 Xray TUN 实验创建的适配器（该方案已废弃，但其残留
+//                   适配器可能还在用户系统里，需要一并清理）
 //   - tunIfaceName  按网卡名兜底
 var ownWintunDescHints = []string{"sing-tun", "xray tunnel", tunIfaceName}
 
@@ -1075,7 +1136,9 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			a.addLogInternal("error", "TUN mode requires administrator privileges")
 			return a.tunRunning, fmt.Errorf("TUN global proxy requires administrator privileges")
 		}
-		// 与 Xray 内核模式互斥：先停内核、还原系统代理
+		// 与 Xray 内核模式互斥：先停内核、还原系统代理，并记住 TUN 开启前的状态
+		// （断开 TUN 时只恢复确实存在过的东西，不凭空替用户开代理）
+		a.tunReplacedCore = a.coreRunning
 		if a.coreRunning {
 			a.stopCoreLocked()
 			a.coreRunning = false
@@ -1083,7 +1146,7 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 				setWindowsSystemProxy(false, "")
 				a.systemProxy = false
 			}
-			a.addLogInternal("info", "Core proxy stopped, switching to TUN global mode")
+			a.addLogInternal("info", "Core proxy stopped, switching to TUN mode")
 		}
 		if err := a.startTunLocked(false); err != nil {
 			a.tunRunning = false
@@ -1093,6 +1156,23 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		}
 	} else {
 		a.stopTunLocked()
+		// TUN 开启前内核与系统代理在跑：断开 TUN 后恢复常规代理模式，
+		// 避免用户点一下托盘开关就落得「什么都没连」的状态
+		if a.tunReplacedCore && !a.coreRunning {
+			if err := a.startCoreLocked(); err != nil {
+				a.addLogInternal("warn", fmt.Sprintf("Core proxy not restored after TUN stop: %v", err))
+			} else {
+				a.coreRunning = true
+				server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
+				if err := setWindowsSystemProxy(true, server); err != nil {
+					a.addLogInternal("error", fmt.Sprintf("Failed to re-enable system proxy after TUN stop: %v", err))
+				} else {
+					a.systemProxy = true
+				}
+				a.addLogInternal("info", fmt.Sprintf("TUN stopped, core proxy restored -> %s", server))
+			}
+		}
+		a.tunReplacedCore = false
 	}
 	a.savePersisted()
 	tray.requestRebuild()
