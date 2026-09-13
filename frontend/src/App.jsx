@@ -1,4 +1,3 @@
-import knLogo from './assets/KNcloud.png';
 import kncFgBlack from './assets/knc-fg-black.png';
 import kncFgWhite from './assets/knc-fg-white.png';
 import kncLoginDark from './assets/knc-login-dark.png';
@@ -39,6 +38,7 @@ import {
   LayoutGrid,
   SlidersHorizontal,
   FolderInput,
+  LoaderCircle,
   Gauge
 } from 'lucide-react';
 
@@ -56,6 +56,8 @@ import {
   GetSubscriptions,
   UpdateNode,
   ImportNodesFromLinks,
+  CopyNodeShareLink,
+  ImportNodesFromClipboard,
   Login,
   GetAccount,
   RefreshAccount,
@@ -478,10 +480,44 @@ export default function App() {
   };
 
   useEffect(() => {
-    const onKey = (e) => {
+    const onKey = async (e) => {
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
         e.preventDefault(); // 拦截 WebView 默认的 Ctrl+R 刷新页面
         handlePingActiveNode();
+        return;
+      }
+      // 节点列表页：Ctrl+C 复制选中节点的分享链接，Ctrl+V 导入剪贴板里的分享链接。
+      // 焦点在输入框/文本域/下拉框时不拦截，保留原生复制粘贴行为
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (activeTab !== 'servers') return;
+      const key = (e.key || '').toLowerCase();
+      if (key !== 'c' && key !== 'v') return;
+      const t = e.target;
+      const tag = ((t && t.tagName) || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      if (key === 'c') {
+        const cur = nodes.find(n => n.active);
+        if (!cur) {
+          showToast('未选择节点，无法复制', 'error');
+          return;
+        }
+        try {
+          await CopyNodeShareLink(cur.id);
+          showToast(`已复制「${cur.name}」的分享链接到剪贴板`, 'success');
+        } catch (err) {
+          showToast('复制失败：' + (err?.message || err), 'error');
+        }
+      } else {
+        try {
+          const count = await ImportNodesFromClipboard();
+          if (count > 0) {
+            setNodes(await GetNodes());
+            showToast(`已从剪贴板导入 ${count} 个节点`, 'success');
+          }
+        } catch (err) {
+          showToast('导入失败：' + (err?.message || err), 'error');
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -667,7 +703,9 @@ export default function App() {
             onClick={handleSimpleConnect}
             title={simpleOn ? '点击切换到全局直连' : '点击开启分流代理（绕过大陆）'}
           >
-            <Power size={56} />
+            {simpleOn && simpleNet === 'checking'
+              ? <LoaderCircle size={56} className="spin" />
+              : <Power size={56} />}
           </button>
 
           <div
@@ -831,7 +869,7 @@ export default function App() {
                 onClick={() => setActiveTab('servers')}
               >
                 <Server size={17} />
-                {!sidebarCollapsed && <span>服务器节点</span>}
+                {!sidebarCollapsed && <span>节点列表</span>}
               </button>
               <button
                 className={`nav-item-btn ${activeTab === 'routing' ? 'active' : ''}`}
@@ -915,30 +953,17 @@ export default function App() {
               )}
 
 
-              {/* Top Hero Status Banner */}
+              {/* Top Hero Status Banner：仅展示当前连接节点 + 策略/TUN 控制 */}
               <div className="win11-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-                  <div style={{
-                    width: '54px',
-                    height: '54px',
-                    borderRadius: '50%',
-                    background: status.running ? 'rgba(16, 124, 65, 0.15)' : 'rgba(128, 128, 128, 0.15)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: status.running ? '#107c41' : '#888'
-                  }}>
-                    <img src={knLogo} alt="KNcloud-WIN" style={{ width: "36px", height: "36px", borderRadius: "8px", objectFit: "cover" }} />
-                  </div>
-                  <div>
-                    <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {status.tunnelMode ? 'TUN 分流代理运行中' : (status.running ? '网络代理已就绪' : '核心引擎已休眠')}
-                    </h2>
-                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                      当前主路由节点: <strong style={{ color: 'var(--accent)' }}>{status.activeNodeName}</strong> ({status.activeNodeProto})
-                      {status.tunnelMode && <span style={{ marginLeft: '8px', padding: '1px 8px', borderRadius: '10px', background: 'rgba(16,124,65,0.15)', color: '#107c41', fontSize: '11px', fontWeight: 600 }}>分流模式 · 大陆直连</span>}
-                    </p>
-                  </div>
+                <div>
+                  <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {status.activeNodeName === '未选择节点' ? '未选择节点' : `当前节点：${status.activeNodeName}`}
+                  </h2>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    {status.activeNodeName === '未选择节点'
+                      ? '请在服务器节点列表中选择一个节点'
+                      : `${status.activeNodeProto}${status.tunnelMode ? ' · TUN 分流（大陆直连）' : ''}`}
+                  </p>
                 </div>
 
                 {/* Routing policy radio + TUN mode switch */}
@@ -1094,8 +1119,8 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div className="content-header" style={{ marginBottom: '8px' }}>
                 <div>
-                  <h1 className="content-title">服务器节点</h1>
-                  <p className="content-subtitle">查看、测速与切换代理服务器节点（Ctrl+R 真连接测速当前节点）</p>
+                  <h1 className="content-title">节点列表</h1>
+                  <p className="content-subtitle">查看、测速与切换代理节点（Ctrl+C 复制链接 · Ctrl+V 导入链接 · Ctrl+R 测速）</p>
                 </div>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <button className="win11-btn" onClick={handlePingAll} disabled={isPingingAll} title="Ctrl+R 可单独测速当前选中的节点">
@@ -1464,7 +1489,7 @@ export default function App() {
       {showAddNodeModal && (
         <div className="modal-overlay" onClick={() => { setShowAddNodeModal(false); resetNodeForm(); }}>
           <div className="win11-dialog" onClick={e => e.stopPropagation()}>
-            <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>{editingNodeId ? '编辑服务器节点' : '添加服务器节点'}</h2>
+            <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>{editingNodeId ? '编辑节点' : '添加节点'}</h2>
             
             <div className="form-group">
               <label className="form-label">节点名称 (备注)</label>
