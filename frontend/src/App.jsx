@@ -974,48 +974,53 @@ export default function App() {
                 </div>
 
                 {/* Routing policy radio + TUN mode switch */}
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>分流策略</span>
-                  <div
-                    className="segmented-control"
-                    style={status.tunnelMode || tunBusy ? { opacity: 0.45, pointerEvents: 'none' } : null}
-                    title={status.tunnelMode ? 'TUN 模式接管中，关闭 TUN 后可切换分流策略' : ''}
-                  >
-                    <button
-                      className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
-                      onClick={() => handleRoutingChange('bypass-cn')}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>分流策略</span>
+                    <div
+                      className="segmented-control"
+                      style={status.tunnelMode || tunBusy ? { opacity: 0.45, pointerEvents: 'none' } : null}
+                      title={status.tunnelMode ? 'TUN 模式接管中，关闭 TUN 后可切换分流策略' : ''}
                     >
-                      绕过大陆
-                    </button>
-                    <button
-                      className={`segment-btn ${status.routingMode === 'global' ? 'active' : ''}`}
-                      onClick={() => handleRoutingChange('global')}
-                    >
-                      全局代理
-                    </button>
-                    <button
-                      className={`segment-btn ${status.routingMode === 'direct' ? 'active' : ''}`}
-                      onClick={() => handleRoutingChange('direct')}
-                    >
-                      全局直连
-                    </button>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>TUN 模式</div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                        {status.tunnelMode ? '虚拟网卡接管全部流量 · 大陆直连' : '虚拟网卡接管全部流量（需管理员）'}
-                      </div>
+                      <button
+                        className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
+                        onClick={() => handleRoutingChange('bypass-cn')}
+                      >
+                        绕过大陆
+                      </button>
+                      <button
+                        className={`segment-btn ${status.routingMode === 'global' ? 'active' : ''}`}
+                        onClick={() => handleRoutingChange('global')}
+                      >
+                        全局代理
+                      </button>
+                      <button
+                        className={`segment-btn ${status.routingMode === 'direct' ? 'active' : ''}`}
+                        onClick={() => handleRoutingChange('direct')}
+                      >
+                        全局直连
+                      </button>
                     </div>
-                    <label className="win11-toggle" title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
-                      <input
-                        type="checkbox"
-                        checked={!!status.tunnelMode}
-                        disabled={tunBusy}
-                        onChange={e => handleToggleTun(e.target.checked)}
-                      />
-                      <span className="toggle-track"><span className="toggle-thumb" /></span>
-                    </label>
+                  </div>
+
+                  <div style={{ width: '1px', height: '40px', background: 'var(--border-subtle)' }} />
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>TUN 模式</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                        {status.tunnelMode ? '虚拟网卡接管全部流量 · 大陆直连' : '虚拟网卡接管全部流量（需管理员）'}
+                      </span>
+                      <label className="win11-toggle" title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
+                        <input
+                          type="checkbox"
+                          checked={!!status.tunnelMode}
+                          disabled={tunBusy}
+                          onChange={e => handleToggleTun(e.target.checked)}
+                        />
+                        <span className="toggle-track"><span className="toggle-thumb" /></span>
+                      </label>
+                    </div>
                   </div>
                 </div>
               </div>
