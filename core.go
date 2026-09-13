@@ -380,7 +380,8 @@ func (a *App) coreTrafficSample() (up, down int64, ok bool) {
 // testNodeRealDelay 真连接测速：为该节点临时启动一个独立 Xray 实例（随机端口 SOCKS 入站），
 // 通过该节点的真实代理链路请求测速 URL（完整 DNS+TCP+TLS+HTTP），返回毫秒；失败返回 -2。
 func testNodeRealDelay(node NodeItem) int {
-	const testURL = "https://www.gstatic.com/generate_204"
+	// 与 v2rayN 默认的真连接延迟测速地址一致，保证数值可比
+	const testURL = "https://www.google.com/generate_204"
 
 	proxyOut, err := buildProxyOutbound(node, false)
 	if err != nil {
@@ -457,19 +458,32 @@ func testNodeRealDelay(node NodeItem) int {
 			TLSHandshakeTimeout: 6 * time.Second,
 		},
 	}
-	start := time.Now()
-	resp, err := client.Get(testURL)
-	if err != nil {
+	// v2rayN 同款口径（GetRealPingTime）：同一客户端连测两次取较小值。
+	// 第一次要建立完整链路（SOCKS 握手 + 节点 TCP/TLS + 目标站 TLS），
+	// 第二次复用 keep-alive 连接只剩 HTTP 往返 —— 取 min 后的结果是
+	// 「热连接」往返时间，与 v2rayN 显示的真连接延迟可比。
+	// 测两次中只要有一次成功即算节点可用，两次都失败才返回 -2。
+	best := -1
+	for i := 0; i < 2; i++ {
+		start := time.Now()
+		resp, err := client.Get(testURL)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode < 500 {
+				ms := int(time.Since(start).Milliseconds())
+				if ms <= 0 {
+					ms = 1
+				}
+				if best < 0 || ms < best {
+					best = ms
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if best < 0 {
 		return -2
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		return -2
-	}
-	ms := int(time.Since(start).Milliseconds())
-	if ms <= 0 {
-		ms = 1
-	}
-	return ms
+	return best
 }
