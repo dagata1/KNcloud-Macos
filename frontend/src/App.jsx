@@ -208,7 +208,7 @@ export default function App() {
   // 关闭按钮的语义取决于「关闭窗口时最小化到托盘」开关
   const closeWindowTitle = settings.minimizeToTray
     ? '关闭（最小化到系统托盘）'
-    : '关闭并退出 KNcloud-WIN';
+    : '关闭并退出程序';
 
   const refreshAllData = async () => {
     try {

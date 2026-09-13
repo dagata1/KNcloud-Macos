@@ -228,7 +228,7 @@ func (t *trayController) buildMenu() {
 
 	systray.AddSeparator()
 
-	miQuit := systray.AddMenuItem("退出 KNcloud-WIN", "退出程序并还原系统代理")
+	miQuit := systray.AddMenuItem("退出", "退出程序并还原系统代理")
 	miQuit.Click(func() { go a.quitApp() })
 }
 

@@ -3,6 +3,10 @@ package main
 // 节点列表的 Ctrl+C / Ctrl+V 支持：分享链接复制到剪贴板 / 从剪贴板导入。
 // 直接走 Win32 剪贴板 API（CF_UNICODETEXT），不经过 PowerShell —— 没有控制台
 // 代码页编码问题（中文节点名），也没有每次拉起进程的几百毫秒延迟。
+//
+// 注意：本文件里 GlobalLock/GetClipboardData 返回的 uintptr 转回 unsafe.Pointer
+// 是 unsafe 包文档第 (3) 条明确允许的模式（syscall 结果转换），go vet 的
+// unsafeptr 检查无法证明而会误报，检查时用 `go vet -unsafeptr=false`。
 
 import (
 	"fmt"

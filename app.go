@@ -90,7 +90,7 @@ type AppSettings struct {
 	CoreType   string `json:"coreType"`
 	DnsServers string `json:"dnsServers"`
 	// MinimizeToTray 为 true 时，点窗口关闭按钮只收进托盘，程序继续后台运行；
-	// 真正退出需要走托盘菜单的「退出 KNcloud-WIN」。
+	// 真正退出需要走托盘菜单的「退出」。
 	MinimizeToTray bool `json:"minimizeToTray"`
 }
 
@@ -910,7 +910,7 @@ func (a *App) SaveSettings(settings AppSettings) error {
 // ------------------------- Lifecycle -------------------------
 
 // beforeClose 关闭窗口时的拦截点。
-// 默认行为是「收进托盘继续后台运行」，只有托盘菜单里的「退出 KNcloud-WIN」
+// 默认行为是「收进托盘继续后台运行」，只有托盘菜单里的「退出」
 // （会先把 quitting 置为 true）才真正退出并清理系统代理 / 内核。
 func (a *App) beforeClose(ctx context.Context) bool {
 	a.mu.RLock()
@@ -943,7 +943,7 @@ func (a *App) cleanup() {
 	a.savePersisted()
 }
 
-// quitApp 真正退出程序：托盘菜单「退出 KNcloud-WIN」与窗口关闭（未开启最小化到托盘）都会走这里。
+// quitApp 真正退出程序：托盘菜单「退出」与窗口关闭（未开启最小化到托盘）都会走这里。
 func (a *App) quitApp() {
 	a.mu.Lock()
 	if a.quitting {
