@@ -1,6 +1,7 @@
 :root {
   color-scheme: light;
   --bg-canvas: #f3f3f3;
+  --bg-solid: #f9f9f9;
   --bg-mica: rgba(243, 243, 243, 0.85);
   --bg-acrylic: rgba(255, 255, 255, 0.75);
   --bg-card: rgba(255, 255, 255, 0.78);
@@ -28,6 +29,7 @@
 .dark-theme {
   color-scheme: dark;
   --bg-canvas: #202020;
+  --bg-solid: #2b2b2b;
   --bg-mica: rgba(32, 32, 32, 0.92);
   --bg-acrylic: rgba(38, 38, 38, 0.88);
   --bg-card: rgba(255, 255, 255, 0.08);
@@ -692,6 +694,89 @@ select.win11-input option {
 .simple-node-select {
   width: 100%;
   height: 36px;
+}
+
+/* 简易模式自定义节点下拉 */
+.simple-node-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease;
+}
+
+.simple-node-trigger:hover {
+  border-color: var(--accent);
+}
+
+.simple-node-trigger .proto-badge,
+.simple-node-item .proto-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.simple-node-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.simple-node-delay {
+  flex-shrink: 0;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+
+.simple-node-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border-default);
+  /* 必须不透明：--bg-card 是半透明的，会透出底下的账号卡片 */
+  background: var(--bg-solid);
+  box-shadow: var(--shadow-dialog);
+  padding: 4px;
+}
+
+.simple-node-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.simple-node-item:hover {
+  background: rgba(128, 128, 128, 0.15);
+}
+
+.simple-node-item.active {
+  background: rgba(128, 128, 128, 0.25);
+}
+
+.simple-node-empty {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
 }
 
 .simple-footer {

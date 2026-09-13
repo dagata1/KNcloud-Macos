@@ -35,6 +35,7 @@ import {
   Copy,
   Pencil,
   Power,
+  ChevronDown,
   LayoutGrid,
   SlidersHorizontal,
   FolderInput,
@@ -78,6 +79,11 @@ export default function App() {
     const s = WINDOW_SIZE[mode] || WINDOW_SIZE.classic;
     WindowSetSize(s.w, s.h);
   };
+  // 节点延迟的展示文字与配色（简易模式节点下拉用）
+  const delayText = d => d > 0 ? `${d}ms` : d === -2 ? '超时' : '未测';
+  const delayColor = d => d > 0
+    ? (d < 300 ? '#3fbf6f' : d < 800 ? '#e5a50a' : '#ff6b6b')
+    : d === -2 ? '#ff6b6b' : 'var(--text-tertiary)';
 
   const [theme, setTheme] = useState('dark');
   const brandLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
@@ -104,6 +110,8 @@ export default function App() {
   const [nodes, setNodes] = useState([]);
   // 简易模式连接检测结果：idle=未连接, checking=检测中, ok=节点可用, fail=节点无效
   const [simpleNet, setSimpleNet] = useState('idle');
+  // 简易模式自定义节点下拉是否展开
+  const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [selectedProto, setSelectedProto] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [isPingingAll, setIsPingingAll] = useState(false);
@@ -618,20 +626,50 @@ export default function App() {
             <span>↓ {status.downSpeed}</span>
           </div>
 
-          <div className="simple-node-area">
+          <div className="simple-node-area" style={{ position: 'relative' }}>
             <label>代理节点</label>
-            <select
-              className="win11-input simple-node-select"
-              value={activeNode ? activeNode.id : ''}
-              onChange={e => handleSimpleSelectNode(e.target.value)}
-            >
-              {nodes.length === 0 && <option value="">暂无节点，请在普通模式中添加</option>}
-              {nodes.map(n => (
-                <option key={n.id} value={n.id}>
-                  {n.name}{n.delay > 0 ? ` · ${n.delay}ms` : n.delay === -2 ? ' · 超时' : ''}
-                </option>
-              ))}
-            </select>
+            <button type="button" className="simple-node-trigger" onClick={() => setNodeMenuOpen(o => !o)}>
+              {activeNode ? (
+                <>
+                  <span className={`proto-badge proto-${activeNode.protocol.toLowerCase()}`}>{activeNode.protocol}</span>
+                  <span className="simple-node-name">{activeNode.name}</span>
+                  <span className="simple-node-delay" style={{ color: delayColor(activeNode.delay) }}>
+                    {delayText(activeNode.delay)}
+                  </span>
+                </>
+              ) : (
+                <span className="simple-node-name">暂无节点，请在普通模式中添加</span>
+              )}
+              <ChevronDown
+                size={14}
+                style={{ flexShrink: 0, opacity: 0.6, transition: 'transform .15s', transform: nodeMenuOpen ? 'rotate(180deg)' : 'none' }}
+              />
+            </button>
+
+            {nodeMenuOpen && (
+              <>
+                <div style={{ position: 'fixed', inset: 0, zIndex: 90 }} onClick={() => setNodeMenuOpen(false)} />
+                <div className="simple-node-menu">
+                  {nodes.length === 0 && <div className="simple-node-empty">暂无节点，请在普通模式中添加</div>}
+                  {nodes.map(n => (
+                    <div
+                      key={n.id}
+                      className={`simple-node-item ${activeNode && n.id === activeNode.id ? 'active' : ''}`}
+                      onClick={() => {
+                        setNodeMenuOpen(false);
+                        if (!activeNode || n.id !== activeNode.id) handleSimpleSelectNode(n.id);
+                      }}
+                    >
+                      <span className={`proto-badge proto-${n.protocol.toLowerCase()}`}>{n.protocol}</span>
+                      <span className="simple-node-name">{n.name}</span>
+                      <span className="simple-node-delay" style={{ color: delayColor(n.delay) }}>
+                        {delayText(n.delay)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
 
           {account && account.loggedIn && (
