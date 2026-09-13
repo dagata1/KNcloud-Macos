@@ -80,12 +80,16 @@ func (a *App) Login(email, password string) (AccountInfo, error) {
 // completeLogin 用已有凭证（auth_data）完成登录：拉取订阅地址与套餐 → 写入账户 → 导入订阅节点。
 // 密码登录与网页授权回传（weblogin.go）共用此入口。
 func (a *App) completeLogin(domain, email, token string) (AccountInfo, error) {
-	transfer, usedUp, usedDown, expire, planName, subURL, err := v2boardGetSubscribe(domain, token)
+	transfer, usedUp, usedDown, expire, planName, subURL, subEmail, err := v2boardGetSubscribe(domain, token)
 	if err != nil {
 		return a.GetAccount(), fmt.Errorf("login succeeded, but failed to fetch subscription: %v", err)
 	}
 	if subURL == "" {
 		return a.GetAccount(), fmt.Errorf("login succeeded, but no valid subscription URL found")
+	}
+	// 回调/密码流程未带邮箱时，优先用订阅接口返回的邮箱（getSubscribe 含 email 字段）
+	if email == "" || email == "web-login" {
+		email = subEmail
 	}
 
 	// 写入账户并关联订阅
@@ -148,7 +152,7 @@ func (a *App) RefreshAccount() (AccountInfo, error) {
 		return a.GetAccount(), fmt.Errorf("not logged in")
 	}
 
-	transfer, usedUp, usedDown, expire, planName, subURL, err := v2boardGetSubscribe(domain, token)
+	transfer, usedUp, usedDown, expire, planName, subURL, subEmail, err := v2boardGetSubscribe(domain, token)
 	if err != nil {
 		if err == errTokenInvalid {
 			a.mu.Lock()
@@ -165,6 +169,10 @@ func (a *App) RefreshAccount() (AccountInfo, error) {
 	a.account.UsedUp = usedUp
 	a.account.UsedDown = usedDown
 	a.account.Expire = expire
+	// 旧版本登录留下的占位邮箱（web-login）用订阅接口返回的真实邮箱补全
+	if (a.account.Email == "" || a.account.Email == "web-login") && subEmail != "" {
+		a.account.Email = subEmail
+	}
 	urlChanged := subURL != "" && subURL != oldSubURL
 	if urlChanged {
 		a.account.SubURL = subURL
@@ -186,36 +194,6 @@ func (a *App) RefreshAccount() (AccountInfo, error) {
 }
 
 // ------------------------- V2Board API -------------------------
-
-// fetchV2boardEmail 用登录凭证拉取账户邮箱（网页授权回传只带 token 时补全用），失败返回空串
-func fetchV2boardEmail(domain, token string) string {
-	domain = strings.TrimRight(domain, "/")
-	req, err := http.NewRequest("GET", domain+"/api/v1/user/info", nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("Authorization", token)
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return ""
-	}
-	var out struct {
-		Data struct {
-			Email string `json:"email"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(data, &out) != nil {
-		return ""
-	}
-	return out.Data.Email
-}
 
 func v2boardLogin(domain, email, password string) (string, error) {
 	domain = strings.TrimRight(domain, "/")
@@ -263,36 +241,36 @@ func v2boardLogin(domain, email, password string) (string, error) {
 	return token, nil
 }
 
-// v2boardGetSubscribe 返回 (总流量, 已用上行, 已用下行, 到期描述, 套餐名, 订阅地址, err)
+// v2boardGetSubscribe 返回 (总流量, 已用上行, 已用下行, 到期描述, 套餐名, 订阅地址, 邮箱, err)
 var errTokenInvalid = fmt.Errorf("session expired, please log in again")
 
-func v2boardGetSubscribe(domain, token string) (int64, int64, int64, string, string, string, error) {
+func v2boardGetSubscribe(domain, token string) (int64, int64, int64, string, string, string, string, error) {
 	domain = strings.TrimRight(domain, "/")
 	req, err := http.NewRequest("GET", domain+"/api/v1/user/getSubscribe", nil)
 	if err != nil {
-		return 0, 0, 0, "", "", "", err
+		return 0, 0, 0, "", "", "", "", err
 	}
 	req.Header.Set("Authorization", token)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, 0, 0, "", "", "", fmt.Errorf("unable to connect to %s: %v", domain, err)
+		return 0, 0, 0, "", "", "", "", fmt.Errorf("unable to connect to %s: %v", domain, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return 0, 0, 0, "", "", "", errTokenInvalid
+		return 0, 0, 0, "", "", "", "", errTokenInvalid
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return 0, 0, 0, "", "", "", err
+		return 0, 0, 0, "", "", "", "", err
 	}
 
 	var out struct {
 		Data map[string]interface{} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil || out.Data == nil {
-		return 0, 0, 0, "", "", "", fmt.Errorf("failed to parse subscription data (HTTP %d)", resp.StatusCode)
+		return 0, 0, 0, "", "", "", "", fmt.Errorf("failed to parse subscription data (HTTP %d)", resp.StatusCode)
 	}
 	d := out.Data
 
@@ -329,7 +307,7 @@ func v2boardGetSubscribe(domain, token string) (int64, int64, int64, string, str
 		expireStr = time.Unix(exp, 0).Format("2006-01-02 到期")
 	}
 
-	return getInt("transfer_enable"), getInt("u"), getInt("d"), expireStr, planName, subURL, nil
+	return getInt("transfer_enable"), getInt("u"), getInt("d"), expireStr, planName, subURL, getStr("email"), nil
 }
 
 // SyncNodes 手动同步 KNcloud 账户订阅节点

@@ -124,14 +124,8 @@ func (a *App) StartWebLogin() (string, error) {
 			}
 			return
 		}
+		// 邮箱优先级：回调参数 > getSubscribe 响应（completeLogin 内处理）
 		email := strings.TrimSpace(res.email)
-		if email == "" || email == "web-login" {
-			// 网页端可能只回传 token：用凭证拉取账户信息补全邮箱（尽力而为）
-			email = fetchV2boardEmail(domain, res.token)
-		}
-		if email == "" {
-			email = "web-login"
-		}
 		acct, err := a.completeLogin(domain, email, res.token)
 		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Web login failed: %v", err))
