@@ -68,9 +68,17 @@ import {
   WindowMax,
   WindowClose
 } from '../wailsjs/go/main/App';
-import { EventsOn } from '../wailsjs/runtime';
+import { EventsOn, WindowSetSize } from '../wailsjs/runtime';
 
 export default function App() {
+  // 简易模式内容少，窗口切到紧凑尺寸；普通模式恢复默认大小
+  // （全局最小尺寸在 main.go 里放开了到 380x560，这里的目标值在其之上）
+  const WINDOW_SIZE = { simple: { w: 420, h: 640 }, classic: { w: 1120, h: 760 } };
+  const applyWindowSize = (mode) => {
+    const s = WINDOW_SIZE[mode] || WINDOW_SIZE.classic;
+    WindowSetSize(s.w, s.h);
+  };
+
   const [theme, setTheme] = useState('dark');
   const brandLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
   const loginLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
@@ -204,7 +212,10 @@ export default function App() {
         setLocalSettings(curSettings);
         if (curSettings.theme === 'light') setTheme('light');
         else if (curSettings.theme === 'dark') setTheme('dark');
-        if (curSettings.uiMode === 'simple') setUiMode('simple');
+        if (curSettings.uiMode === 'simple') {
+          setUiMode('simple');
+          applyWindowSize('simple');
+        }
       }
     } catch (e) {
       console.error("Init data load error", e);
@@ -248,6 +259,7 @@ export default function App() {
   const handleUiModeToggle = async () => {
     const next = uiMode === 'classic' ? 'simple' : 'classic';
     setUiMode(next);
+    applyWindowSize(next);
     try {
       await SaveSettings({ ...settings, uiMode: next });
       setLocalSettings(prev => ({ ...prev, uiMode: next }));

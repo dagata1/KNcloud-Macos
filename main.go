@@ -25,8 +25,8 @@ func main() {
 		Title:     "KNcloud-WIN",
 		Width:     1120,
 		Height:    760,
-		MinWidth:  880,
-		MinHeight: 600,
+		MinWidth:  380,  // 简易模式需要缩到紧凑尺寸（前端切换模式时自动调整）
+		MinHeight: 560,
 		Frameless: true, // 自定义 Win11 沉浸式标题栏
 		AssetServer: &assetserver.Options{
 			Assets: assets,
