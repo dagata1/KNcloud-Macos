@@ -60,7 +60,13 @@ func (a *App) StartWebLogin() (string, error) {
 		domain = kncloudDefaultDomain
 	}
 
+	// 惰性初始化回调服务管理器（指针化，防止拷贝内部互斥锁）；并发启动时由 a.mu 串行化
+	a.mu.Lock()
+	if a.webLogin == nil {
+		a.webLogin = &webLoginManager{}
+	}
 	m := a.webLogin
+	a.mu.Unlock()
 	m.mu.Lock()
 	m.stopLocked() // 重复点击时先关掉上一次的回调服务
 
@@ -149,7 +155,12 @@ func (a *App) CancelWebLogin() {
 }
 
 func (a *App) stopWebLogin() {
+	a.mu.Lock()
 	m := a.webLogin
+	a.mu.Unlock()
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
