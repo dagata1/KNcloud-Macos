@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function AddNode(arg1:main.NodeItem):Promise<void>;
 
+export function CancelWebLogin():Promise<void>;
+
 export function ClearLogs():Promise<void>;
 
 export function DeleteNode(arg1:string):Promise<void>;
@@ -45,8 +47,6 @@ export function SimpleConnect(arg1:boolean):Promise<boolean>;
 export function SkipLogin():Promise<main.AccountInfo>;
 
 export function StartWebLogin():Promise<string>;
-
-export function CancelWebLogin():Promise<void>;
 
 export function SyncNodes():Promise<void>;
 

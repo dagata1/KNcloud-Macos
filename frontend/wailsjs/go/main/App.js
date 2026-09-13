@@ -6,6 +6,10 @@ export function AddNode(arg1) {
   return window['go']['main']['App']['AddNode'](arg1);
 }
 
+export function CancelWebLogin() {
+  return window['go']['main']['App']['CancelWebLogin']();
+}
+
 export function ClearLogs() {
   return window['go']['main']['App']['ClearLogs']();
 }
@@ -88,10 +92,6 @@ export function SkipLogin() {
 
 export function StartWebLogin() {
   return window['go']['main']['App']['StartWebLogin']();
-}
-
-export function CancelWebLogin() {
-  return window['go']['main']['App']['CancelWebLogin']();
 }
 
 export function SyncNodes() {
