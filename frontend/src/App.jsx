@@ -37,7 +37,8 @@ import {
   Power,
   LayoutGrid,
   SlidersHorizontal,
-  FolderInput
+  FolderInput,
+  Gauge
 } from 'lucide-react';
 
 import {
@@ -991,7 +992,7 @@ export default function App() {
                           onClick={(e) => handlePingSingleNode(node.id, e)}
                           title="真连接测速"
                         >
-                          <RefreshCw size={12} />
+                          <Gauge size={12} />
                         </button>
                         <button
                           className="win11-btn danger"
