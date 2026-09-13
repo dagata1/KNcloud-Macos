@@ -884,9 +884,11 @@ export default function App() {
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
-                        <span className={`latency-pill ${node.delay > 0 && node.delay < 300 ? 'latency-good' : node.delay < 800 ? 'latency-medium' : 'latency-none'}`}>
-                          <Zap size={12} /> {node.delay > 0 ? `${node.delay} ms` : node.delay === -2 ? '超时' : '未测速'}
-                        </span>
+                        {(node.delay > 0 || node.delay === -2) && (
+                          <span className={`latency-pill ${node.delay > 0 && node.delay < 300 ? 'latency-good' : node.delay < 800 ? 'latency-medium' : 'latency-none'}`}>
+                            <Zap size={12} /> {node.delay > 0 ? `${node.delay} ms` : '超时'}
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {node.name}
@@ -967,10 +969,12 @@ export default function App() {
                     </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-                      <span className={`latency-pill ${node.delay > 0 && node.delay < 300 ? 'latency-good' : node.delay < 800 ? 'latency-medium' : 'latency-none'}`} style={{ fontSize: '12px' }}>
-                        <Zap size={13} />
-                        {node.delay > 0 ? `${node.delay} ms` : node.delay === -2 ? '超时' : '未测速'}
-                      </span>
+                      {(node.delay > 0 || node.delay === -2) && (
+                        <span className={`latency-pill ${node.delay > 0 && node.delay < 300 ? 'latency-good' : node.delay < 800 ? 'latency-medium' : 'latency-none'}`} style={{ fontSize: '12px' }}>
+                          <Zap size={13} />
+                          {node.delay > 0 ? `${node.delay} ms` : '超时'}
+                        </span>
+                      )}
 
                       <div style={{ display: 'flex', gap: '6px' }}>
                         <button
