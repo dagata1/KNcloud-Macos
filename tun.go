@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/binary"
 	"encoding/json"
@@ -485,27 +486,93 @@ func physicalInterfaceName(host string) string {
 }
 
 // lookupNodeIPv4s 解析节点服务器的 IPv4 地址（最多 4 个）；Address 为 IP 字面量时直接返回
+// isBogusUnicastV4 判断该 IPv4 是否不可能作为节点服务器地址（组播/保留/链路本地等）。
+// 系统 DNS 对被墙域名的污染应答经常落在这类地址段，TUN 启动前必须剔除。
+func isBogusUnicastV4(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return true
+	}
+	if v4.IsUnspecified() || v4.IsLoopback() || v4.IsMulticast() ||
+		v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() {
+		return true
+	}
+	// 240.0.0.0/4 保留段（含 255.255.255.255，IsMulticast 不覆盖）
+	if v4[0] >= 240 {
+		return true
+	}
+	// 198.18.0.0/15 基准测试段（各类 fake-ip 方案的惯用段）
+	if v4[0] == 198 && v4[1] == 18 {
+		return true
+	}
+	return false
+}
+
+func filterValidIPv4s(ips []net.IP) []net.IP {
+	var out []net.IP
+	for _, ip := range ips {
+		v4 := ip.To4()
+		if v4 == nil || isBogusUnicastV4(v4) {
+			continue
+		}
+		out = append(out, v4)
+		if len(out) >= 4 {
+			break
+		}
+	}
+	return out
+}
+
+// lookupIPv4Via 绕过系统 DNS，直接向指定公共 DNS 查询 A 记录并过滤非法地址。
+// 用于系统 DNS 被污染（应答全部落在非法段）时的兜底。
+func lookupIPv4Via(host, dns string) []net.IP {
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", net.JoinHostPort(dns, "53"))
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := r.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil
+	}
+	raw := make([]net.IP, 0, len(ips))
+	for _, a := range ips {
+		raw = append(raw, a.IP)
+	}
+	return filterValidIPv4s(raw)
+}
+
+// lookupNodeIPv4s 解析节点服务器的 IPv4。系统 DNS 对被墙域名可能返回污染应答
+// （组播/保留段等非法地址），先解析再剔除；全部非法时改用公共 DNS
+// （223.5.5.5 / 119.29.29.29）直查兜底。
 func lookupNodeIPv4s(host string) []net.IP {
 	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
+		if v4 := ip.To4(); v4 != nil && !isBogusUnicastV4(v4) {
 			return []net.IP{v4}
 		}
 		return nil
 	}
+	if ips := filterValidIPv4s(mustLookupIPs(host)); len(ips) > 0 {
+		return ips
+	}
+	for _, dns := range []string{"223.5.5.5", "119.29.29.29"} {
+		if ips := lookupIPv4Via(host, dns); len(ips) > 0 {
+			return ips
+		}
+	}
+	return nil
+}
+
+func mustLookupIPs(host string) []net.IP {
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		return nil
 	}
-	var out []net.IP
-	for _, ip := range ips {
-		if v4 := ip.To4(); v4 != nil {
-			out = append(out, v4)
-			if len(out) >= 4 {
-				break
-			}
-		}
-	}
-	return out
+	return ips
 }
 
 // rangeToCIDRs 将闭区间 [start, end] 拆成 CIDR 列表
@@ -601,10 +668,11 @@ func vlog(format string, args ...interface{}) {
 func applySstapRouting(node NodeItem, tunIdx uint32) (hostRoutes []mibIPForwardRow, routed int, err error) {
 	hidden := &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
-	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）
+	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）。
+	//    系统 DNS 对被墙域名可能返回污染应答（组播/保留段），已剔除并内置公共 DNS 兜底。
 	nodeIPs := lookupNodeIPv4s(node.Address)
 	if len(nodeIPs) == 0 {
-		return nil, 0, fmt.Errorf("failed to resolve IPv4 address of node %s (IPv6-only nodes are not supported in TUN mode)", node.Address)
+		return nil, 0, fmt.Errorf("failed to resolve a valid IPv4 address for node %s (system DNS may be polluted; IPv6-only nodes are not supported in TUN mode)", node.Address)
 	}
 
 	// 1) 网卡 metric 抢到最高 + 系统 DNS 指向劫持地址（等价 SSTap 设置 TAP 适配器 DNS/跃点数）
