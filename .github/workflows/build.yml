@@ -1,0 +1,63 @@
+name: Build KNcloud-WIN
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Wails CLI
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+
+      - name: Install Frontend Dependencies
+        shell: bash
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Build Application with Wails
+        shell: bash
+        run: |
+          wails build -platform windows/amd64 -clean
+
+      - name: Rename & Stage Binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/bin/KNcloud-WIN.exe dist/ || cp build/bin/*.exe dist/
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KNcloud-WIN-windows-amd64
+          path: dist/*.exe
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
