@@ -231,10 +231,15 @@ export default function App() {
         setLocalSettings(curSettings);
         if (curSettings.theme === 'light') setTheme('light');
         else if (curSettings.theme === 'dark') setTheme('dark');
-        if (curSettings.uiMode === 'simple') {
-          setUiMode('simple');
-          applyWindowSize('simple');
-        }
+        // 按持久化的模式 + 登录态统一决定窗口尺寸：
+        //   未登录 → 登录页紧凑尺寸；已登录 → 简洁模式紧凑尺寸 / 普通模式默认尺寸
+        // （此前只在 uiMode==='simple' 时调整，classic 持久化的简单模式下窗口不会缩小）
+        if (curSettings.uiMode === 'simple') setUiMode('simple');
+        else if (curSettings.uiMode === 'classic') setUiMode('classic');
+        const loggedIn = !!(curAccount && curAccount.loggedIn);
+        applyWindowSize(loggedIn
+          ? (curSettings.uiMode === 'classic' ? 'classic' : 'simple')
+          : 'simple');
       }
     } catch (e) {
       console.error("Init data load error", e);
@@ -311,9 +316,15 @@ export default function App() {
       setLoginForm({ email: '', password: '' });
       setSubscriptions(await GetSubscriptions());
       setNodes(await GetNodes());
-      // 登录成功默认进入简洁模式（窗口同步切到紧凑尺寸）
+      // 登录成功默认进入简洁模式（窗口同步切到紧凑尺寸），并持久化，
+      // 否则下次启动 settings 里仍是 classic，窗口不会缩小
       setUiMode('simple');
       applyWindowSize('simple');
+      try {
+        const s = await GetSettings();
+        await SaveSettings({ ...s, uiMode: 'simple' });
+        setLocalSettings(prev => ({ ...prev, uiMode: 'simple' }));
+      } catch (e) { /* ignore */ }
     } catch (e) {
       setLoginErr(String(e?.message || e).replace(/^.*?: /, ''));
     }
@@ -329,9 +340,14 @@ export default function App() {
         setSubscriptions(await GetSubscriptions());
         setNodes(await GetNodes());
       } catch (e) { /* ignore */ }
-      // 登录成功默认进入简洁模式（窗口同步切到紧凑尺寸）
+      // 登录成功默认进入简洁模式（窗口同步切到紧凑尺寸），并持久化
       setUiMode('simple');
       applyWindowSize('simple');
+      try {
+        const s = await GetSettings();
+        await SaveSettings({ ...s, uiMode: 'simple' });
+        setLocalSettings(prev => ({ ...prev, uiMode: 'simple' }));
+      } catch (e) { /* ignore */ }
       showToast('网页登录成功，订阅已同步', 'success');
     });
     const offErr = EventsOn('kncloud:web-login-error', (msg) => {
