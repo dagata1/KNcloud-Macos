@@ -64,6 +64,7 @@ const tapMTU = 1500
 var (
 	wintunModPath                  string
 	wintunMod                      *windows.LazyDLL
+	wintunProcOpenAdapter          *windows.LazyProc
 	wintunProcCreateAdapter        *windows.LazyProc
 	wintunProcCloseAdapter         *windows.LazyProc
 	wintunProcStartSession         *windows.LazyProc
@@ -108,6 +109,7 @@ func loadWintunAPI() error {
 		}
 
 		mod := windows.NewLazyDLL(wintunModPath)
+		pOpen := mod.NewProc("WintunOpenAdapter")
 		pCreate := mod.NewProc("WintunCreateAdapter")
 		pClose := mod.NewProc("WintunCloseAdapter")
 		pStart := mod.NewProc("WintunStartSession")
@@ -121,13 +123,14 @@ func loadWintunAPI() error {
 			wintunLoadErr = e
 			return
 		}
-		for _, p := range []*windows.LazyProc{pCreate, pClose, pStart, pEnd, pEvt, pRecv, pRel, pSend, pLUID} {
+		for _, p := range []*windows.LazyProc{pOpen, pCreate, pClose, pStart, pEnd, pEvt, pRecv, pRel, pSend, pLUID} {
 			if e := p.Find(); e != nil {
 				wintunLoadErr = e
 				return
 			}
 		}
 		wintunMod = mod
+		wintunProcOpenAdapter = pOpen
 		wintunProcCreateAdapter = pCreate
 		wintunProcCloseAdapter = pClose
 		wintunProcStartSession = pStart
@@ -150,16 +153,31 @@ func wintutCreatePersistentAdapter(name string) (adapter uintptr, err error) {
 	if e != nil {
 		return 0, e
 	}
+	// wintun.dll 为旧版 API：返回句柄（非零成功），第 4 参是 DWORD* LastError
+	var lastErr uint32
 	r1, _, _ := wintunProcCreateAdapter.Call(
 		uintptr(unsafe.Pointer(namePtr)),
 		uintptr(unsafe.Pointer(typePtr)),
 		uintptr(unsafe.Pointer(&knTapGUID)),
-		uintptr(unsafe.Pointer(&adapter)),
+		uintptr(unsafe.Pointer(&lastErr)),
 	)
-	if r1 != 0 {
-		return 0, fmt.Errorf("WintunCreateAdapter failed: winerr %d", r1)
+	if r1 == 0 {
+		return 0, fmt.Errorf("WintunCreateAdapter failed: lasterr=%d", lastErr)
 	}
-	return adapter, nil
+	return r1, nil
+}
+
+func wintunOpenAdapterByName(name string) (uintptr, error) {
+	namePtr, e := windows.UTF16PtrFromString(name)
+	if e != nil {
+		return 0, e
+	}
+	var adapter uintptr
+	r1, _, _ := wintunProcOpenAdapter.Call(uintptr(unsafe.Pointer(namePtr)), uintptr(unsafe.Pointer(&adapter)))
+	if r1 != 0 {
+		return adapter, nil
+	}
+	return 0, fmt.Errorf("WintunOpenAdapter failed: lasterr=%d", windows.GetLastError())
 }
 
 func wintunStartSession(adapter uintptr, capacity uint32) (session uintptr, err error) {
@@ -174,7 +192,7 @@ func wintunStartSession(adapter uintptr, capacity uint32) (session uintptr, err 
 func wintunAdapterIfIndex(adapter uintptr) (uint32, error) {
 	var luid uint64
 	wintunProcGetAdapterLUID.Call(adapter, uintptr(unsafe.Pointer(&luid)))
-	row := &windows.MibIpInterfaceRow{InterfaceLuid: luid}
+	row := &windows.MibIpInterfaceRow{Family: 2 /*AF_INET*/, InterfaceLuid: luid}
 	if err := windows.GetIpInterfaceEntry(row); err != nil {
 		return 0, fmt.Errorf("GetIpInterfaceEntry: %v", err)
 	}
@@ -187,6 +205,7 @@ func wintunAdapterIfIndex(adapter uintptr) (uint32, error) {
 // 长期存在于系统，进程退出也不销毁 —— 与 SSTap 的 TAP-Windows 一致）
 type tapPersistentAdapter struct {
 	mu      sync.Mutex
+	rx      sync.Mutex // wintun Receive/Release 单线程互斥（0.10 API 无内部锁）
 	handle  uintptr
 	session uintptr
 	readEvt windows.Handle
@@ -206,9 +225,13 @@ func (p *tapPersistentAdapter) ensure() (ifIdx uint32, err error) {
 	if err := loadWintunAPI(); err != nil {
 		return 0, fmt.Errorf("wintun.dll unavailable: %v", err)
 	}
-	adapter, err := wintutCreatePersistentAdapter(tunIfaceName)
-	if err != nil {
-		return 0, err
+	// 先尝试打开已存在的常驻适配器（SSTap 同款复用语义），不存在才创建
+	adapter, aerr := wintunOpenAdapterByName(tunIfaceName)
+	if aerr != nil {
+		adapter, err = wintutCreatePersistentAdapter(tunIfaceName)
+		if err != nil {
+			return 0, fmt.Errorf("open: %v; create: %v", aerr, err)
+		}
 	}
 	// 读写环大小：2MB 足够代理流量吞吐，内存占用可控
 	session, err := wintunStartSession(adapter, 0x200000)
@@ -257,6 +280,7 @@ type tunLinkEndpoint struct {
 	readEvt    windows.Handle
 	stopCh     chan struct{}
 	dispatcher stack.NetworkDispatcher
+	stopped    sync.WaitGroup
 	mu         sync.Mutex
 }
 
@@ -273,6 +297,7 @@ func (e *tunLinkEndpoint) Attach(d stack.NetworkDispatcher) {
 	e.dispatcher = d
 	e.mu.Unlock()
 	if d != nil {
+		e.stopped.Add(1)
 		go e.readLoop(d)
 	}
 }
@@ -295,6 +320,13 @@ func (e *tunLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool { return true }
 // readLoop 从 wintun 读环持续取包注入 netstack。
 // WaitForSingleObject 等待读环事件（有包立即唤醒，无包 200ms 超时醒来检查 stop）。
 func (e *tunLinkEndpoint) readLoop(d stack.NetworkDispatcher) {
+	defer e.stopped.Done()
+	// cgo 回调中的访问违例不允许带崩整个进程（尤其 gvisor 协议栈协程并发期）
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("[tapstack] readLoop panic recovered:", r)
+		}
+	}()
 	for {
 		select {
 		case <-e.stopCh:
@@ -308,14 +340,22 @@ func (e *tunLinkEndpoint) readLoop(d stack.NetworkDispatcher) {
 		}
 		e.mu.Lock()
 		session := e.adapter.session
+		disp := e.dispatcher
 		e.mu.Unlock()
-		if session == 0 {
+		if session == 0 || disp == nil {
 			return
 		}
 		for {
+			select {
+			case <-e.stopCh:
+				return
+			default:
+			}
+			e.adapter.rx.Lock()
 			var size uint32
 			packet, _, _ := wintunProcReceivePacket.Call(session, uintptr(unsafe.Pointer(&size)))
 			if packet == 0 {
+				e.adapter.rx.Unlock()
 				break // ERROR_NO_MORE_ITEMS：本轮读完
 			}
 			data := unsafe.Slice((*byte)(unsafe.Pointer(packet)), size)
@@ -333,10 +373,12 @@ func (e *tunLinkEndpoint) readLoop(d stack.NetworkDispatcher) {
 				var buf buffer.Buffer
 				_ = buf.Append(v)
 				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buf})
-				d.DeliverNetworkPacket(proto, pkt)
+				disp.DeliverNetworkPacket(proto, pkt)
 				pkt.DecRef()
 			}
-			wintunProcReleaseReceivePacket.Call(session, uintptr(size))
+			// 第二参数是包指针（ReceivePacket 的返回值），不是长度
+			wintunProcReleaseReceivePacket.Call(session, packet)
+			e.adapter.rx.Unlock()
 		}
 	}
 }
@@ -349,6 +391,8 @@ func (e *tunLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.
 	if session == 0 {
 		return 0, &tcpip.ErrAborted{}
 	}
+	e.adapter.rx.Lock()
+	defer e.adapter.rx.Unlock()
 	n := 0
 	for _, pkt := range pkts.AsSlice() {
 		data := pkt.ToView().AsSlice()
@@ -656,6 +700,7 @@ func (a *App) stopTapForwarding() {
 	f := a.tap
 	a.tap = nil
 	close(f.stopCh)
+	f.linkEP.stopped.Wait() // 等 readLoop 退出，再销毁协议栈
 	f.stack.Destroy()
 	f.wg.Wait()
 }
@@ -892,6 +937,7 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		// 1) Xray 内核（代理大脑）必须在线；未运行则静默拉起
 		if !a.coreRunning {
 			if err := a.startCoreLocked(); err != nil {
+				a.addLogInternal("error", fmt.Sprintf("TUN: start core failed: %v", err))
 				return a.tunRunning, fmt.Errorf("start core failed: %v", err)
 			}
 			a.coreRunning = true
@@ -901,22 +947,27 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		// 2) 常驻虚拟网卡（首次创建，之后复用；重启系统后依然存在）
 		ifIdx, err := knTap.ensure()
 		if err != nil {
+			a.addLogInternal("error", fmt.Sprintf("TUN: adapter error: %v", err))
 			return a.tunRunning, fmt.Errorf("adapter error: %v", err)
 		}
 		a.tunIfaceIdx = ifIdx
+		a.addLogInternal("info", fmt.Sprintf("TUN: adapter %s ready (ifIdx %d)", tunIfaceName, ifIdx))
 		if err := configureTapAdapter(ifIdx); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("TUN: configure adapter failed: %v", err))
 			return a.tunRunning, err
 		}
 
 		// 3) 铺路由（DNS 劫持 + 节点 /32 防回环 + 按策略分流）并启动转发
 		hostRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
 		if rtErr != nil {
+			a.addLogInternal("error", fmt.Sprintf("TUN: routing setup failed: %v", rtErr))
 			a.removeTapRouting()
 			return a.tunRunning, fmt.Errorf("SSTap routing setup failed: %v", rtErr)
 		}
 		a.tunHostRoutes = hostRoutes
 		addTunIPv6Route(ifIdx)
 		if err := a.startTapForwarding(); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("TUN: forwarding stack failed: %v", err))
 			a.removeTapRouting()
 			return a.tunRunning, fmt.Errorf("forwarding stack failed: %v", err)
 		}

@@ -119,8 +119,7 @@ export default function App() {
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [selectedProto, setSelectedProto] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
-  // 节点列表多选：Ctrl+A 全选 / Ctrl+点击 加减选；Ctrl+R 批量测速选中项
-  const [selectedNodeIds, setSelectedNodeIds] = useState([]);
+  const [switchingNodeId, setSwitchingNodeId] = useState(null); // 正在切换中的节点 ID
   const [isPingingAll, setIsPingingAll] = useState(false);
 
   // Subscriptions & Logs
@@ -461,11 +460,37 @@ export default function App() {
   };
 
   const handleSelectNode = async (id) => {
-    await SelectNode(id);
-    const updatedNodes = await GetNodes();
-    setNodes(updatedNodes);
-    const updated = await GetCoreStatus();
-    setStatus(updated);
+    const target = nodes.find(n => n.id === id);
+    if (!target) return;
+    if (target.active) {
+      showToast(`当前已连接至「${target.name}」`, 'info');
+      return;
+    }
+    if (switchingNodeId) return;
+
+    setSwitchingNodeId(id);
+    // 乐观更新：立刻让选中圆点与高亮跳到目标节点，界面零延迟即时响应
+    setNodes(prev => prev.map(n => ({ ...n, active: n.id === id })));
+    setStatus(prev => ({
+      ...prev,
+      activeNodeName: target.name,
+      activeNodeProto: target.protocol
+    }));
+
+    try {
+      await SelectNode(id);
+      showToast(`已切换至「${target.name}」`, 'success');
+    } catch (e) {
+      showToast('切换节点失败：' + (e?.message || e), 'error');
+    } finally {
+      const [updatedNodes, updatedStatus] = await Promise.all([
+        GetNodes(),
+        GetCoreStatus()
+      ]);
+      if (updatedNodes) setNodes(updatedNodes);
+      if (updatedStatus) setStatus(updatedStatus);
+      setSwitchingNodeId(null);
+    }
   };
 
   const handlePingSingleNode = async (id, e) => {
@@ -475,64 +500,29 @@ export default function App() {
     setNodes(updatedNodes);
   };
 
-  // Ctrl+R：真连接测速。有 Ctrl+A / Ctrl+点击 选中的节点时批量测速（逐个测，
-  // 一条 toast 显示进度），否则测速当前选中（active）的节点。PingNode 在后端起
-  // 临时内核经节点真实请求，耗时较长，用 ref 防止重复触发。
+  // Ctrl+R：真连接测速当前活动节点
   const pingingActiveRef = useRef(false);
   const handlePingSelected = async () => {
     if (pingingActiveRef.current) return;
-    const targets = selectedNodeIds.length > 0
-      ? nodes.filter(n => selectedNodeIds.includes(n.id))
-      : nodes.filter(n => n.active);
-    if (targets.length === 0) {
+    const cur = nodes.find(n => n.active);
+    if (!cur) {
       showToast('未选择节点，无法测速', 'error');
       return;
     }
     pingingActiveRef.current = true;
-    const total = targets.length;
-    if (total === 1) {
-      const cur = targets[0];
-      showToast(`正在真连接测速「${cur.name}」…`);
-      try {
-        await PingNode(cur.id);
-        const updated = await GetNodes();
-        setNodes(updated);
-        const n = updated.find(x => x.id === cur.id);
-        if (n && n.delay > 0) {
-          showToast(`「${n.name}」测速完成：${n.delay} ms`, 'success');
-        } else {
-          showToast(`「${cur.name}」测速超时或失败`, 'error');
-        }
-      } catch (e) {
-        showToast('测速失败：' + (e?.message || e), 'error');
-      }
-      pingingActiveRef.current = false;
-      return;
-    }
-    // 批量测速：showToast 只能追加新条目，这里用固定 id 的进度 toast 原地更新
-    const pid = ++toastIdRef.current;
-    const setProgress = (msg, type) => setToasts(list => [
-      ...list.filter(t => t.id !== pid),
-      { id: pid, msg, type: type || 'info' }
-    ]);
-    setProgress(`正在真连接测速 ${total} 个节点…`);
+    showToast(`正在真连接测速「${cur.name}」…`);
     try {
-      let ok = 0;
-      for (let i = 0; i < total; i++) {
-        const t = targets[i];
-        setProgress(`正在测速「${t.name}」（${i + 1}/${total}）…`);
-        try {
-          await PingNode(t.id);
-        } catch (e) { /* 单个失败继续下一个，结果按 delay 判定 */ }
-        const updated = await GetNodes();
-        setNodes(updated);
-        const n = updated.find(x => x.id === t.id);
-        if (n && n.delay > 0) ok++;
+      await PingNode(cur.id);
+      const updated = await GetNodes();
+      setNodes(updated);
+      const n = updated.find(x => x.id === cur.id);
+      if (n && n.delay > 0) {
+        showToast(`「${n.name}」测速完成：${n.delay} ms`, 'success');
+      } else {
+        showToast(`「${cur.name}」测速超时或失败`, 'error');
       }
-      setProgress(`批量测速完成：${ok}/${total} 个可用`, ok === total ? 'success' : 'error');
-      setTimeout(() => setToasts(list => list.filter(t => t.id !== pid)), 3500);
     } catch (e) {
-      showToast('批量测速失败：' + (e?.message || e), 'error');
+      showToast('测速失败：' + (e?.message || e), 'error');
     }
     pingingActiveRef.current = false;
   };
@@ -544,20 +534,9 @@ export default function App() {
         handlePingSelected();
         return;
       }
-      // 节点列表页：Ctrl+A 全选节点（配合 Ctrl+R 批量测速）；Ctrl+C 复制选中节点的
-      // 分享链接，Ctrl+V 导入剪贴板里的分享链接。
-      // 焦点在输入框/文本域/下拉框时不拦截，保留原生复制粘贴/全选行为
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
       if (activeTab !== 'servers') return;
       const key = (e.key || '').toLowerCase();
-      if (key === 'a') {
-        const t = e.target;
-        const tag = ((t && t.tagName) || '').toLowerCase();
-        if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
-        e.preventDefault();
-        setSelectedNodeIds(nodes.map(n => n.id));
-        return;
-      }
       if (key !== 'c' && key !== 'v') return;
       const t = e.target;
       const tag = ((t && t.tagName) || '').toLowerCase();
@@ -1053,13 +1032,6 @@ export default function App() {
                         绕过大陆
                       </button>
                       <button
-                        className={`segment-btn ${status.routingMode === 'proxy-cn' ? 'active' : ''}`}
-                        onClick={() => handleRoutingChange('proxy-cn')}
-                        title="仅代理中国大陆 IP，其余直连（TUN 模式下同样生效）"
-                      >
-                        仅代理国内
-                      </button>
-                      <button
                         className={`segment-btn ${status.routingMode === 'global' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('global')}
                       >
@@ -1206,82 +1178,58 @@ export default function App() {
           {/* TAB 2: SERVERS (NODES) */}
           {activeTab === 'servers' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div className="content-header" style={{ marginBottom: '8px' }}>
+              <div className="content-header" style={{ marginBottom: '4px' }}>
                 <div>
                   <h1 className="content-title">节点列表</h1>
-                  <p className="content-subtitle">查看、测速与切换代理节点（Ctrl+A 全选 · Ctrl+点击加选 · Ctrl+C 复制 · Ctrl+V 导入 · Ctrl+R 测速）</p>
-                </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  {selectedNodeIds.length > 0 && (
-                    <button className="win11-btn" onClick={handlePingSelected} title="真连接测速所有选中的节点（快捷键 Ctrl+R）">
-                      <Gauge size={14} />
-                      <span>测速选中（{selectedNodeIds.length}）</span>
-                    </button>
-                  )}
-                  <button className="win11-btn" onClick={handlePingAll} disabled={isPingingAll} title="Ctrl+R 可单独测速当前选中的节点">
-                    <Zap size={14} />
-                    <span>全部真连接测速</span>
-                  </button>
-                  <button className="win11-btn" onClick={() => setShowImportModal(true)}>
-                    <FolderInput size={14} />
-                    <span>导入分享链接</span>
-                  </button>
-                  <button className="win11-btn primary" onClick={() => setShowAddNodeModal(true)}>
-                    <Plus size={14} />
-                    <span>添加节点</span>
-                  </button>
                 </div>
               </div>
 
-
-
               {/* Nodes List */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
-                {filteredNodes.map(node => (
-                  <div
-                    key={node.id}
-                    className="win11-card"
-                    onClick={(e) => {
-                      if (e.ctrlKey || e.metaKey) {
-                        // Ctrl+点击：加入 / 移出多选，不切换当前节点
-                        setSelectedNodeIds(ids => ids.includes(node.id)
-                          ? ids.filter(x => x !== node.id)
-                          : [...ids, node.id]);
-                        return;
-                      }
-                      setSelectedNodeIds([node.id]);
-                      handleSelectNode(node.id);
-                    }}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '12px 18px',
-                      cursor: 'pointer',
-                      border: node.active || selectedNodeIds.includes(node.id)
-                        ? '2px solid var(--accent)'
-                        : '1px solid var(--border-subtle)',
-                      background: node.active ? 'var(--accent-subtle)' : 'var(--bg-card)'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1 }}>
-                      <div style={{
-                        width: '18px',
-                        height: '18px',
-                        borderRadius: '50%',
-                        border: node.active ? '5px solid var(--accent)' : '2px solid var(--border-default)',
-                        backgroundColor: 'transparent'
-                      }} />
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
-                          <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>{node.name}</strong>
-                        </div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                          {node.address}:{node.port} · 安全: {node.security} · 传输: {node.network}
+                {filteredNodes.map(node => {
+                  const isSwitching = switchingNodeId === node.id;
+                  return (
+                    <div
+                      key={node.id}
+                      className="win11-card"
+                      onClick={() => handleSelectNode(node.id)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '12px 18px',
+                        cursor: node.active ? 'default' : 'pointer',
+                        border: node.active
+                          ? '2px solid var(--accent)'
+                          : '1px solid var(--border-subtle)',
+                        background: node.active ? 'var(--accent-subtle)' : 'var(--bg-card)',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1 }}>
+                        <div style={{
+                          width: '18px',
+                          height: '18px',
+                          borderRadius: '50%',
+                          border: node.active ? '5px solid var(--accent)' : '2px solid var(--border-default)',
+                          backgroundColor: 'transparent',
+                          transition: 'border 0.15s ease'
+                        }} />
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
+                            <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>{node.name}</strong>
+                            {isSwitching && (
+                              <span style={{ fontSize: '11px', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                <RefreshCw size={11} className="spin" /> 切换中…
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                            {node.address}:{node.port} · 安全: {node.security} · 传输: {node.network}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
                       {(node.delay > 0 || node.delay === -2) && (
@@ -1319,7 +1267,8 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                ))}
+                );
+              })}
               </div>
             </div>
           )}

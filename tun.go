@@ -555,15 +555,12 @@ func lookupNodeIPv4s(host string) []net.IP {
 		}
 		return nil
 	}
-	if ips := filterValidIPv4s(mustLookupIPs(host)); len(ips) > 0 {
-		return ips
-	}
 	for _, dns := range []string{"223.5.5.5", "119.29.29.29"} {
 		if ips := lookupIPv4Via(host, dns); len(ips) > 0 {
 			return ips
 		}
 	}
-	return nil
+	return filterValidIPv4s(mustLookupIPs(host))
 }
 
 func mustLookupIPs(host string) []net.IP {
@@ -650,8 +647,9 @@ func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes 
 	}
 
 	// 3) 节点服务器 IP 写 /32 直连路由防回环（沿系统真实最优路由，支持 on-link 网关/PPPoE）
+	var lastAddErr error
 	for _, ip := range nodeIPs {
-		base, ok := bestRouteForIPv4(ip, tunIdx)
+		base, ok := getBestRoute(ip)
 		if !ok {
 			vlog("no best route found for node IP %s", ip)
 			continue
@@ -675,13 +673,24 @@ func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes 
 			}
 		}
 		if err := addRouteRow(&row); err != nil {
-			vlog("addRouteRow(%s/32) failed: %v", ip, err)
-			continue
+			// 上次失败尝试可能已残留同一条 /32 路由（The object already exists）——
+			// 视为成功并纳入管理，保证后续 removeHostRoutes 能清理它
+			if syscall.Errno(5010) != err {
+				vlog("addRouteRow(%s/32) failed: %v", ip, err)
+				lastAddErr = fmt.Errorf("add route %s/32 via %s ifIdx=%d: %v", ip, dwordToIP(base.NextHop), base.IfIndex, err)
+				continue
+			}
 		}
 		hostRoutes = append(hostRoutes, row)
 	}
 	if len(hostRoutes) == 0 {
-		return hostRoutes, 0, fmt.Errorf("failed to write direct host route: system route to %s not found", nodeIPs[0])
+		rows, terr := getIpForwardTable()
+		br, brok := getBestRoute(nodeIPs[0])
+		if lastAddErr != nil {
+			return hostRoutes, 0, fmt.Errorf("failed to write direct host route for %s: %v", nodeIPs[0], lastAddErr)
+		}
+		return hostRoutes, 0, fmt.Errorf("failed to write direct host route: system route to %s not found (diag: tableRows=%d tableErr=%v getBestRoute ok=%v ifIdx=%d nextHop=%s ips=%v)",
+			nodeIPs[0], len(rows), terr, brok, br.IfIndex, dwordToIP(br.NextHop), nodeIPs)
 	}
 
 	// 4) 按当前策略写分流路由（全部指向 TUN 网关；策略由 sstap.go 的规则引擎计算）

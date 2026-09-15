@@ -185,7 +185,6 @@ func (t *trayController) buildMenu() {
 	// 策略对 TUN 分流同样生效（sstap.go 规则引擎），TUN 运行时不再置灰
 	for _, m := range []struct{ id, label string }{
 		{"bypass-cn", "绕过大陆 (GFWList & CN)"},
-		{"proxy-cn", "仅代理国内 (China-IP-only)"},
 		{"global", "全局代理"},
 		{"direct", "全局直连"},
 	} {
