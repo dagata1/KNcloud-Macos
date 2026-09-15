@@ -1,7 +1,8 @@
 build/bin
 node_modules
 frontend/dist
+dist/
 /KNcloud.exe
 /KNcloud-WIN.exe
 .workbuddy-ai/
-frontend/package.json.md5 
+frontend/package.json.md5
