@@ -785,17 +785,30 @@ func (a *App) tunReapplyRoutesLocked() error {
 		return fmt.Errorf("no node selected")
 	}
 	a.removeTapRouting()
-	hostRoutes, _, rtErr := applySstapRouting(*node, a.tunIfaceIdx, a.routingMode)
+	hostRoutes, _, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, func() string {
+		if a.nativeTunRunning() {
+			return nativeSSTapRouterIP
+		}
+		return tunGateway
+	}(), func() string {
+		if a.nativeTunRunning() {
+			return ""
+		}
+		return tunDnsAddr
+	}())
 	if rtErr != nil {
 		return rtErr
 	}
 	a.tunHostRoutes = hostRoutes
-	addTunIPv6Route(a.tunIfaceIdx)
+	if !a.nativeTunRunning() {
+		_ = addTunIPv6Route(a.tunIfaceIdx)
+	}
 	return nil
 }
 
 // tunSoftStopLocked TUN 软停止（tapstack 版）：停转发 + 撤路由，常驻网卡保留
 func (a *App) tunSoftStopLocked() {
+	a.stopNativeTun()
 	a.stopTapForwarding()
 	a.removeTapRouting()
 	if a.tunRunning {
@@ -1014,6 +1027,23 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			a.addLogInternal("info", "Core proxy auto-started for TUN mode")
 		}
 
+		// Prefer the native C/lwIP tun2socks engine used by SSTap. It consumes the
+		// installed TAP-Windows adapter directly and avoids the Go/gVisor path.
+		if err := a.startNativeTun(*node); err == nil {
+			hostRoutes, nRouted, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, nativeSSTapRouterIP, "")
+			if rtErr != nil {
+				a.stopNativeTun()
+				a.removeTapRouting()
+				return a.tunRunning, fmt.Errorf("SSTap routing setup failed: %v", rtErr)
+			}
+			a.tunHostRoutes = hostRoutes
+			a.tunRunning = true
+			a.addLogInternal("info", fmt.Sprintf("SSTap native engine ready | %d routes | policy %s | node: %s", nRouted, a.routingMode, node.Name))
+			a.savePersisted()
+			tray.requestRebuild()
+			return a.tunRunning, nil
+		}
+
 		// 2) 常驻虚拟网卡（首次创建，之后复用；重启系统后依然存在）
 		ifIdx, err := knTap.ensure()
 		if err != nil {
@@ -1047,6 +1077,7 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			tunIfaceName, nRouted, a.routingMode, node.Name))
 	} else {
 		// 关闭：停转发 + 撤路由；网卡常驻保留，下次开启秒级生效
+		a.stopNativeTun()
 		a.stopTapForwarding()
 		a.removeTapRouting()
 		if a.tunRunning {

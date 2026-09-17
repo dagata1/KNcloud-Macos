@@ -97,40 +97,42 @@ type AppSettings struct {
 }
 
 type App struct {
-	ctx            context.Context
-	mu             sync.RWMutex
-	nodes          []NodeItem
-	subscriptions  []SubscriptionItem
-	logMu          sync.Mutex // 单独保护 logs / logIDCounter：日志会被托盘、测速等
-	logs           []LogItem  // 未持 a.mu 的 goroutine 写入，不能共用 a.mu
-	logIDCounter   int64
-	settings       AppSettings
-	coreRunning    bool
-	systemProxy    bool
-	routingMode    string
-	activeNodeID   string
-	totalUpBytes   int64
-	totalDownBytes int64
-	lastUpSpeed    string
-	lastDownSpeed  string
-	lastUpSample   int64
-	lastDownSample int64
-	xrayInst       *xcore.Instance
-	tunCmd         *exec.Cmd
-	tunRunning     bool
-	tunIfaceIdx    uint32
-	tunJob         windows.Handle    // sing-box 所在 KILL_ON_JOB_CLOSE Job
-	tunProcDone    chan struct{}     // sing-box 进程退出信号
-	tunHostRoutes  []mibIPForwardRow // 写入物理网卡的节点 /32 直连路由（断开时回收）
-	tunReplacedCore bool             // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
-	tunWarm         bool             // sing-box 与虚拟网卡热待机（TUN 软停止后保留，重开秒级生效）
-	tunWarmNode     NodeItem         // 热待机中 sing-box 出站使用的节点（变更后需冷启动重建）
-	tap             *tapForwarder    // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
-	tunSampleUp    int64
-	tunSampleDown  int64
-	account        AccountInfo
-	quitting       bool // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
-	webLogin       *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
+	ctx             context.Context
+	mu              sync.RWMutex
+	nodes           []NodeItem
+	subscriptions   []SubscriptionItem
+	logMu           sync.Mutex // 单独保护 logs / logIDCounter：日志会被托盘、测速等
+	logs            []LogItem  // 未持 a.mu 的 goroutine 写入，不能共用 a.mu
+	logIDCounter    int64
+	settings        AppSettings
+	coreRunning     bool
+	systemProxy     bool
+	routingMode     string
+	activeNodeID    string
+	totalUpBytes    int64
+	totalDownBytes  int64
+	lastUpSpeed     string
+	lastDownSpeed   string
+	lastUpSample    int64
+	lastDownSample  int64
+	xrayInst        *xcore.Instance
+	tunCmd          *exec.Cmd
+	tunRunning      bool
+	tunIfaceIdx     uint32
+	tunJob          windows.Handle    // sing-box 所在 KILL_ON_JOB_CLOSE Job
+	tunProcDone     chan struct{}     // sing-box 进程退出信号
+	tunHostRoutes   []mibIPForwardRow // 写入物理网卡的节点 /32 直连路由（断开时回收）
+	tunReplacedCore bool              // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
+	tunWarm         bool              // sing-box 与虚拟网卡热待机（TUN 软停止后保留，重开秒级生效）
+	tunWarmNode     NodeItem          // 热待机中 sing-box 出站使用的节点（变更后需冷启动重建）
+	tap             *tapForwarder     // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
+	nativeTunCmd    *exec.Cmd         // C/lwIP tun2socks helper, SSTap-compatible fast path
+	nativeTunDone   chan struct{}
+	tunSampleUp     int64
+	tunSampleDown   int64
+	account         AccountInfo
+	quitting        bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
+	webLogin        *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
 }
 
 func NewApp() *App {

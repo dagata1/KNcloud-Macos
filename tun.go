@@ -55,6 +55,8 @@ var (
 	procCreateIpForwardEntry        = iphlpapi.NewProc("CreateIpForwardEntry")
 	procDeleteIpForwardEntry        = iphlpapi.NewProc("DeleteIpForwardEntry")
 	procConvertInterfaceLuidToIndex = iphlpapi.NewProc("ConvertInterfaceLuidToIndex")
+	procGetIpInterfaceTable         = iphlpapi.NewProc("GetIpInterfaceTable")
+	procFreeMibTable                = iphlpapi.NewProc("FreeMibTable")
 )
 
 // 保留网段：永不写入虚拟网卡（私有/链路本地/组播等，保持系统直连行为）
@@ -376,10 +378,29 @@ func addRouteRow(row *mibIPForwardRow) error {
 // 目标 metric 叠加在本接口的 interface metric 之上。
 func interfaceMetric4(ifIdx uint32) uint32 {
 	row := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: ifIdx}
-	if err := windows.GetIpInterfaceEntry(&row); err != nil {
-		return 0
+	if err := windows.GetIpInterfaceEntry(&row); err == nil && row.Metric > 0 {
+		return row.Metric
 	}
-	return row.Metric
+	// Fallback via GetIpInterfaceTable (Vista+ alignment/lookup)
+	var pTable uintptr
+	r, _, _ := procGetIpInterfaceTable.Call(windows.AF_INET, uintptr(unsafe.Pointer(&pTable)))
+	if r == 0 && pTable != 0 {
+		defer procFreeMibTable.Call(pTable)
+		numEntries := *(*uint32)(unsafe.Pointer(pTable))
+		rowSize := unsafe.Sizeof(windows.MibIpInterfaceRow{})
+		// On 32-bit Windows rowSize is 172; on 64-bit it aligns to 8 bytes after NumEntries
+		base := pTable + 4
+		if unsafe.Sizeof(uintptr(0)) == 8 {
+			base = pTable + 8
+		}
+		for i := uint32(0); i < numEntries; i++ {
+			entry := (*windows.MibIpInterfaceRow)(unsafe.Pointer(base + uintptr(i)*rowSize))
+			if entry.InterfaceIndex == ifIdx && entry.Metric > 0 {
+				return entry.Metric
+			}
+		}
+	}
+	return 0
 }
 
 // addRoute2 便捷封装：目的 CIDR 经指定网卡/网关写入路由。
@@ -621,6 +642,13 @@ func vlog(format string, args ...interface{}) {
 // policy 决定分流路由集合（bypass-cn / global / proxy-cn / sstap:<rules 文件>）。
 // 返回写入物理网卡的节点直连路由（断开时需回收）与 TUN 上生效的分流路由条数。
 func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes []mibIPForwardRow, routed int, err error) {
+	return applySstapRoutingWithGateway(node, tunIdx, policy, tunGateway, tunDnsAddr)
+}
+
+// applySstapRoutingWithGateway applies the same SSTap CIDR routing policy to a
+// specific TAP adapter topology. Native SSTap uses a different gateway and does
+// not expose the sing-box fake DNS listener.
+func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway, dnsAddr string) (hostRoutes []mibIPForwardRow, routed int, err error) {
 	hidden := &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
 	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）。
@@ -632,19 +660,26 @@ func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes 
 
 	// 1) 网卡 metric 抢到最高 + 系统 DNS 指向劫持地址（等价 SSTap 设置 TAP 适配器 DNS/跃点数）
 	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		fmt.Sprintf("Set-NetIPInterface -InterfaceIndex %d -InterfaceMetric %d; Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses '%s'",
-			tunIdx, tunMetric, tunIdx, tunDnsAddr))
+		fmt.Sprintf("Set-NetIPInterface -InterfaceIndex %d -InterfaceMetric %d%s",
+			tunIdx, tunMetric, func() string {
+				if dnsAddr == "" {
+					return ""
+				}
+				return fmt.Sprintf("; Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses '%s'", tunIdx, dnsAddr)
+			}()))
 	ps.SysProcAttr = hidden
 	if out, err := ps.CombinedOutput(); err != nil {
 		return nil, 0, fmt.Errorf("failed to configure adapter DNS/metric: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	gw := net.ParseIP(tunGateway)
+	gw := net.ParseIP(gateway)
 
 	// 2) DNS 劫持地址送进 TUN（系统 DNS 查询会被 sing-box port53 规则接管）
-	_, dnsNet, _ := net.ParseCIDR(tunDnsAddr + "/32")
-	if err := addRoute2(tunIdx, *dnsNet, gw, 1); err != nil {
-		return nil, 0, fmt.Errorf("failed to write DNS hijack route: %w", err)
+	if dnsAddr != "" {
+		_, dnsNet, _ := net.ParseCIDR(dnsAddr + "/32")
+		if err := addRoute2(tunIdx, *dnsNet, gw, 1); err != nil {
+			return nil, 0, fmt.Errorf("failed to write DNS hijack route: %w", err)
+		}
 	}
 
 	// 3) 节点服务器 IP 写 /32 直连路由防回环（沿系统真实最优路由，支持 on-link 网关/PPPoE）
@@ -657,14 +692,19 @@ func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes 
 		}
 		vlog("node %s -> base route ifIdx=%d nextHop=%s metric=%d",
 			ip, base.IfIndex, dwordToIP(base.NextHop), base.Metric1)
+		m := interfaceMetric4(base.IfIndex)
+		metric := base.Metric1
+		if m > 0 {
+			metric = m + 1
+		}
 		row := mibIPForwardRow{
 			Dest:    ipToDword(ip),
 			Mask:    0xFFFFFFFF,
 			NextHop: base.NextHop,
 			IfIndex: base.IfIndex,
 			Type:    base.Type,
-			// 合成 metric = 物理 NIC 接口 metric + 1（该网卡上最高优先级）
-			Metric1: interfaceMetric4(base.IfIndex) + 1,
+			// 合成 metric：优先采用接口 metric + 1，若探测不到则直接继承 GetBestRoute 算出的最优路由 metric
+			Metric1: metric,
 		}
 		if row.Type != ipRouteTypeDirect && row.Type != ipRouteTypeIndirect {
 			if row.NextHop == 0 {
@@ -1086,7 +1126,7 @@ func indexFoldASCII(s, sub string) int {
 // 只删除描述命中这些关键字的设备，避免误删 WireGuard / 其它 VPN 的 wintun 适配器：
 //   - "sing-tun"    当前 TUN 方案（内嵌 sing-box）创建的适配器
 //   - "xray tunnel" 早期进程内 Xray TUN 实验创建的适配器（该方案已废弃，但其残留
-//                   适配器可能还在用户系统里，需要一并清理）
+//     适配器可能还在用户系统里，需要一并清理）
 //   - tunIfaceName  按网卡名兜底
 var ownWintunDescHints = []string{"sing-tun", "xray tunnel", tunIfaceName}
 

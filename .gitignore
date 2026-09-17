@@ -8,3 +8,8 @@ dist/
 frontend/package.json.md5
 v2rayN-win11.exe
 wintun.dll
+
+# Native SSTap-compatible build workspace
+third_party/
+cores/native/share/
+KNcloud-WIN-test.exe
