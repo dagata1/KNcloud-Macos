@@ -72,6 +72,7 @@ var (
 	wintunProcGetReadWaitEvent     *windows.LazyProc
 	wintunProcReceivePacket        *windows.LazyProc
 	wintunProcReleaseReceivePacket *windows.LazyProc
+	wintunProcAllocateSendPacket   *windows.LazyProc
 	wintunProcSendPacket           *windows.LazyProc
 	wintunProcGetAdapterLUID       *windows.LazyProc
 	wintunLoaded                   sync.Once
@@ -86,7 +87,7 @@ func loadWintunAPI() error {
 		exePath, e := os.Executable()
 		if e == nil {
 			dst := filepath.Join(filepath.Dir(exePath), "wintun.dll")
-			if _, se := os.Stat(dst); se != nil {
+			if fi, se := os.Stat(dst); se != nil || fi.Size() != int64(len(wintunDLL)) {
 				if we := os.WriteFile(dst, wintunDLL, 0644); we == nil {
 					wintunModPath = dst
 				}
@@ -101,9 +102,11 @@ func loadWintunAPI() error {
 				return
 			}
 			dst := filepath.Join(cfgDir, "wintun.dll")
-			if we := os.WriteFile(dst, wintunDLL, 0644); we != nil {
-				wintunLoadErr = we
-				return
+			if fi, se := os.Stat(dst); se != nil || fi.Size() != int64(len(wintunDLL)) {
+				if we := os.WriteFile(dst, wintunDLL, 0644); we != nil {
+					wintunLoadErr = we
+					return
+				}
 			}
 			wintunModPath = dst
 		}
@@ -117,13 +120,14 @@ func loadWintunAPI() error {
 		pEvt := mod.NewProc("WintunGetReadWaitEvent")
 		pRecv := mod.NewProc("WintunReceivePacket")
 		pRel := mod.NewProc("WintunReleaseReceivePacket")
+		pAlloc := mod.NewProc("WintunAllocateSendPacket")
 		pSend := mod.NewProc("WintunSendPacket")
 		pLUID := mod.NewProc("WintunGetAdapterLUID")
 		if e := mod.Load(); e != nil {
 			wintunLoadErr = e
 			return
 		}
-		for _, p := range []*windows.LazyProc{pOpen, pCreate, pClose, pStart, pEnd, pEvt, pRecv, pRel, pSend, pLUID} {
+		for _, p := range []*windows.LazyProc{pOpen, pCreate, pClose, pStart, pEnd, pEvt, pRecv, pRel, pAlloc, pSend, pLUID} {
 			if e := p.Find(); e != nil {
 				wintunLoadErr = e
 				return
@@ -138,6 +142,7 @@ func loadWintunAPI() error {
 		wintunProcGetReadWaitEvent = pEvt
 		wintunProcReceivePacket = pRecv
 		wintunProcReleaseReceivePacket = pRel
+		wintunProcAllocateSendPacket = pAlloc
 		wintunProcSendPacket = pSend
 		wintunProcGetAdapterLUID = pLUID
 	})
@@ -153,16 +158,14 @@ func wintutCreatePersistentAdapter(name string) (adapter uintptr, err error) {
 	if e != nil {
 		return 0, e
 	}
-	// wintun.dll 为旧版 API：返回句柄（非零成功），第 4 参是 DWORD* LastError
-	var lastErr uint32
+	// Wintun 0.14 返回适配器句柄，失败时通过 GetLastError 获取错误码。
 	r1, _, _ := wintunProcCreateAdapter.Call(
 		uintptr(unsafe.Pointer(namePtr)),
 		uintptr(unsafe.Pointer(typePtr)),
 		uintptr(unsafe.Pointer(&knTapGUID)),
-		uintptr(unsafe.Pointer(&lastErr)),
 	)
 	if r1 == 0 {
-		return 0, fmt.Errorf("WintunCreateAdapter failed: lasterr=%d", lastErr)
+		return 0, fmt.Errorf("WintunCreateAdapter failed: lasterr=%d", windows.GetLastError())
 	}
 	return r1, nil
 }
@@ -172,10 +175,9 @@ func wintunOpenAdapterByName(name string) (uintptr, error) {
 	if e != nil {
 		return 0, e
 	}
-	var adapter uintptr
-	r1, _, _ := wintunProcOpenAdapter.Call(uintptr(unsafe.Pointer(namePtr)), uintptr(unsafe.Pointer(&adapter)))
+	r1, _, _ := wintunProcOpenAdapter.Call(uintptr(unsafe.Pointer(namePtr)))
 	if r1 != 0 {
-		return adapter, nil
+		return r1, nil
 	}
 	return 0, fmt.Errorf("WintunOpenAdapter failed: lasterr=%d", windows.GetLastError())
 }
@@ -192,11 +194,32 @@ func wintunStartSession(adapter uintptr, capacity uint32) (session uintptr, err 
 func wintunAdapterIfIndex(adapter uintptr) (uint32, error) {
 	var luid uint64
 	wintunProcGetAdapterLUID.Call(adapter, uintptr(unsafe.Pointer(&luid)))
-	row := &windows.MibIpInterfaceRow{Family: 2 /*AF_INET*/, InterfaceLuid: luid}
-	if err := windows.GetIpInterfaceEntry(row); err != nil {
-		return 0, fmt.Errorf("GetIpInterfaceEntry: %v", err)
+
+	// 1. 优先使用 Windows NDIS 官方 LUID -> IfIndex 转换 API（无视 AF_INET 是否已在 MIB 登记）
+	var ifIdx uint32
+	ret, _, _ := procConvertInterfaceLuidToIndex.Call(uintptr(unsafe.Pointer(&luid)), uintptr(unsafe.Pointer(&ifIdx)))
+	if ret == 0 && ifIdx != 0 {
+		return ifIdx, nil
 	}
-	return row.InterfaceIndex, nil
+
+	// 2. 备用方式：轮询 net.InterfaceByName / GetIpInterfaceEntry
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if iface, err := net.InterfaceByName(tunIfaceName); err == nil && iface.Index > 0 {
+			return uint32(iface.Index), nil
+		}
+		row := &windows.MibIpInterfaceRow{Family: 2 /*AF_INET*/, InterfaceLuid: luid}
+		if err := windows.GetIpInterfaceEntry(row); err == nil && row.InterfaceIndex != 0 {
+			return row.InterfaceIndex, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 最终兜底尝试 net.InterfaceByName
+	if iface, err := net.InterfaceByName(tunIfaceName); err == nil && iface.Index > 0 {
+		return uint32(iface.Index), nil
+	}
+	return 0, fmt.Errorf("ConvertInterfaceLuidToIndex failed (ret=%d), adapter %s not found", ret, tunIfaceName)
 }
 
 // ------------------------- 常驻适配器管理 -------------------------
@@ -284,10 +307,10 @@ type tunLinkEndpoint struct {
 	mu         sync.Mutex
 }
 
-func (e *tunLinkEndpoint) MTU() uint32                       { return e.mtu }
-func (e *tunLinkEndpoint) SetMTU(mtu uint32)                 { e.mtu = mtu }
-func (e *tunLinkEndpoint) MaxHeaderLength() uint16           { return 0 }
-func (e *tunLinkEndpoint) LinkAddress() tcpip.LinkAddress    { return "" }
+func (e *tunLinkEndpoint) MTU() uint32                        { return e.mtu }
+func (e *tunLinkEndpoint) SetMTU(mtu uint32)                  { e.mtu = mtu }
+func (e *tunLinkEndpoint) MaxHeaderLength() uint16            { return 0 }
+func (e *tunLinkEndpoint) LinkAddress() tcpip.LinkAddress     { return "" }
 func (e *tunLinkEndpoint) SetLinkAddress(a tcpip.LinkAddress) {}
 func (e *tunLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
 	return 0 // 无硬件校验和卸载：netstack 软件计算校验和
@@ -399,11 +422,13 @@ func (e *tunLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.
 		if len(data) == 0 {
 			continue
 		}
-		buf := append([]byte(nil), data...)
-		r1, _, _ := wintunProcSendPacket.Call(session, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-		if r1 == 0 {
-			n++
+		packet, _, _ := wintunProcAllocateSendPacket.Call(session, uintptr(len(data)))
+		if packet == 0 {
+			continue
 		}
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(packet)), len(data)), data)
+		wintunProcSendPacket.Call(session, packet)
+		n++
 	}
 	return n, nil
 }
@@ -605,11 +630,12 @@ func (a *App) startTapForwarding() error {
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 
+	stopCh := make(chan struct{})
 	link := &tunLinkEndpoint{
 		mtu:     tapMTU,
 		adapter: knTap,
 		readEvt: knTap.readEvt,
-		stopCh:  make(chan struct{}),
+		stopCh:  stopCh,
 	}
 	if err := s.CreateNIC(1, link); err != nil {
 		return fmt.Errorf("gvisor CreateNIC: %v", err)
@@ -634,7 +660,7 @@ func (a *App) startTapForwarding() error {
 		socksAddr: fmt.Sprintf("127.0.0.1:%d", a.settings.SocksPort),
 		dnsAddr:   "223.5.5.5:53",
 		physIdx:   physIdx,
-		stopCh:    make(chan struct{}),
+		stopCh:    stopCh,
 	}
 
 	// TCP：每条连接 SOCKS5 CONNECT 到原始目标
@@ -693,16 +719,56 @@ func (a *App) startTapForwarding() error {
 }
 
 // stopTapForwarding 停止协议栈与全部转发协程（网卡保留）
+// 为避免 f.wg.Wait() 在 a.mu 持有期间无限阻塞（活跃 TCP 连接的 io.Copy 无超时），
+// 先 close(f.stopCh) + stack.Destroy() 强制关闭全部 gvisor 端点，
+// 然后在后台 goroutine 中完成 wg.Wait，不阻塞调用方。
 func (a *App) stopTapForwarding() {
 	if a.tap == nil {
 		return
 	}
 	f := a.tap
 	a.tap = nil
-	close(f.stopCh)
-	f.linkEP.stopped.Wait() // 等 readLoop 退出，再销毁协议栈
+
+	// 1. 关闭停止通道，通知 readLoop 与所有转发协程退出
+	if f.stopCh != nil {
+		select {
+		case <-f.stopCh:
+		default:
+			close(f.stopCh)
+		}
+	}
+	if f.linkEP != nil && f.linkEP.stopCh != nil && f.linkEP.stopCh != f.stopCh {
+		select {
+		case <-f.linkEP.stopCh:
+		default:
+			close(f.linkEP.stopCh)
+		}
+	}
+
+	// 2. 唤醒 readLoop 中的 WaitForSingleObject
+	if knTap.readEvt != 0 {
+		_ = windows.SetEvent(knTap.readEvt)
+	}
+
+	// 3. 等待 readLoop 退出，设置 400ms 超时保护，杜绝死锁阻塞 SimpleConnect
+	if f.linkEP != nil {
+		done := make(chan struct{})
+		go func() {
+			f.linkEP.stopped.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(400 * time.Millisecond):
+			a.addLogInternal("warn", "TUN readLoop stopped wait timed out (400ms)")
+		}
+	}
+
+	// 4. 销毁协议栈，令所有正在读写的 TCP/UDP 端点立即报错退出
 	f.stack.Destroy()
-	f.wg.Wait()
+
+	// 5. 转发协程在后台等待完全退出，不阻塞当前线程
+	go f.wg.Wait()
 }
 
 // tunReapplyRoutesLocked TUN 运行中按当前活动节点与策略重铺路由
@@ -902,11 +968,15 @@ func (a *App) removeTapRouting() {
 		if n := deleteRoutesOnInterface(idx); n > 0 {
 			a.addLogInternal("info", fmt.Sprintf("Removed %d split routes", n))
 		}
-		removeTunIPv6Route(idx)
-		c := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-			fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", idx))
-		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-		_ = c.Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		psCmd := fmt.Sprintf(
+			"Remove-NetRoute -InterfaceIndex %d -DestinationPrefix '2000::/3' -Confirm:$false -ErrorAction SilentlyContinue; "+
+				"Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses -ErrorAction SilentlyContinue",
+			idx, idx)
+		ps := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd)
+		ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+		_ = ps.Run()
 	}
 }
 

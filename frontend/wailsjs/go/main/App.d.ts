@@ -12,6 +12,8 @@ export function CopyNodeShareLink(arg1:string):Promise<boolean>;
 
 export function DeleteNode(arg1:string):Promise<void>;
 
+export function DeleteNodes(arg1:Array<string>):Promise<void>;
+
 export function GetAccount():Promise<main.AccountInfo>;
 
 export function GetCoreStatus():Promise<main.CoreStatus>;
@@ -37,6 +39,8 @@ export function Logout():Promise<main.AccountInfo>;
 export function PingAllNodes():Promise<Array<main.NodeItem>>;
 
 export function PingNode(arg1:string):Promise<number>;
+
+export function PingNodes(arg1:Array<string>):Promise<Array<main.NodeItem>>;
 
 export function RefreshAccount():Promise<main.AccountInfo>;
 

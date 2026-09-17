@@ -49,6 +49,7 @@ import {
   DeleteNode,
   PingNode,
   PingAllNodes,
+  PingNodes,
   GetCoreStatus,
   ToggleCore,
   SetRoutingMode,
@@ -119,6 +120,7 @@ export default function App() {
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [selectedProto, setSelectedProto] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedNodeIds, setSelectedNodeIds] = useState([]); // 节点列表多选（Ctrl+A / Ctrl+点击 / Shift+点击）
   const [switchingNodeId, setSwitchingNodeId] = useState(null); // 正在切换中的节点 ID
   const [isPingingAll, setIsPingingAll] = useState(false);
 
@@ -447,10 +449,14 @@ export default function App() {
       await SimpleConnect(on);
     } catch (e) {
       showToast(String(e?.message || e).replace(/^.*?: /, ''), 'error');
+    } finally {
+      try {
+        const s = await GetCoreStatus();
+        setStatus(s);
+      } catch (_) {}
+      setTunPending(null);
+      setTunBusy(false);
     }
-    setStatus(await GetCoreStatus());
-    setTunPending(null);
-    setTunBusy(false);
   };
 
   const handleRoutingChange = async (mode) => {
@@ -500,74 +506,121 @@ export default function App() {
     setNodes(updatedNodes);
   };
 
-  // Ctrl+R：真连接测速当前活动节点
+  // Ctrl+R：真连接测速（多选时批量测速所有选中节点；单选或未选时测速当前节点）
   const pingingActiveRef = useRef(false);
   const handlePingSelected = async () => {
-    if (pingingActiveRef.current) return;
-    const cur = nodes.find(n => n.active);
-    if (!cur) {
-      showToast('未选择节点，无法测速', 'error');
+    if (pingingActiveRef.current || isPingingAll) return;
+
+    if (selectedNodeIds.length > 1) {
+      pingingActiveRef.current = true;
+      setIsPingingAll(true);
+      showToast(`正在对选中的 ${selectedNodeIds.length} 个节点进行真连接测速…`, "info");
+      try {
+        const res = await PingNodes(selectedNodeIds);
+        setNodes(res);
+        showToast(`已完成 ${selectedNodeIds.length} 个节点的批量测速`, "success");
+      } catch (err) {
+        showToast("批量测速失败：" + (err?.message || err), "error");
+      } finally {
+        setIsPingingAll(false);
+        pingingActiveRef.current = false;
+      }
       return;
     }
+
+    let targetNode = null;
+    if (selectedNodeIds.length === 1) {
+      targetNode = nodes.find(n => n.id === selectedNodeIds[0]);
+    }
+    if (!targetNode) {
+      targetNode = nodes.find(n => n.active);
+    }
+    if (!targetNode) {
+      showToast("未选择节点，无法测速", "error");
+      return;
+    }
+
     pingingActiveRef.current = true;
-    showToast(`正在真连接测速「${cur.name}」…`);
+    showToast(`正在真连接测速「${targetNode.name}」…`);
     try {
-      await PingNode(cur.id);
+      await PingNode(targetNode.id);
       const updated = await GetNodes();
       setNodes(updated);
-      const n = updated.find(x => x.id === cur.id);
+      const n = updated.find(x => x.id === targetNode.id);
       if (n && n.delay > 0) {
-        showToast(`「${n.name}」测速完成：${n.delay} ms`, 'success');
+        showToast(`「${n.name}」测速完成：${n.delay} ms`, "success");
       } else {
-        showToast(`「${cur.name}」测速超时或失败`, 'error');
+        showToast(`「${targetNode.name}」测速超时或失败`, "error");
       }
     } catch (e) {
-      showToast('测速失败：' + (e?.message || e), 'error');
+      showToast("测速失败：" + (e?.message || e), "error");
+    } finally {
+      pingingActiveRef.current = false;
     }
-    pingingActiveRef.current = false;
   };
 
   useEffect(() => {
     const onKey = async (e) => {
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+      // Ctrl+R 测速
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "r" || e.key === "R")) {
         e.preventDefault(); // 拦截 WebView 默认的 Ctrl+R 刷新页面
         handlePingSelected();
         return;
       }
+      // Esc 取消节点多选
+      if (e.key === "Escape" && selectedNodeIds.length > 0) {
+        e.preventDefault();
+        setSelectedNodeIds([]);
+        return;
+      }
+      // Ctrl+A 节点列表全选
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "a" || e.key === "A")) {
+        if (activeTab === "servers") {
+          const t = e.target;
+          const tag = ((t && t.tagName) || "").toLowerCase();
+          if (tag !== "input" && tag !== "textarea" && tag !== "select" && !(t && t.isContentEditable)) {
+            e.preventDefault();
+            const allIds = filteredNodes.map(n => n.id);
+            setSelectedNodeIds(allIds);
+            showToast(`已全选 ${allIds.length} 个节点（按 Ctrl+R 批量测速）`, "info");
+            return;
+          }
+        }
+      }
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      if (activeTab !== 'servers') return;
-      const key = (e.key || '').toLowerCase();
-      if (key !== 'c' && key !== 'v') return;
+      if (activeTab !== "servers") return;
+      const key = (e.key || "").toLowerCase();
+      if (key !== "c" && key !== "v") return;
       const t = e.target;
-      const tag = ((t && t.tagName) || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+      const tag = ((t && t.tagName) || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || (t && t.isContentEditable)) return;
       e.preventDefault();
-      if (key === 'c') {
+      if (key === "c") {
         const cur = nodes.find(n => n.active);
         if (!cur) {
-          showToast('未选择节点，无法复制', 'error');
+          showToast("未选择节点，无法复制", "error");
           return;
         }
         try {
           await CopyNodeShareLink(cur.id);
-          showToast(`已复制「${cur.name}」的分享链接到剪贴板`, 'success');
+          showToast(`已复制「${cur.name}」的分享链接到剪贴板`, "success");
         } catch (err) {
-          showToast('复制失败：' + (err?.message || err), 'error');
+          showToast("复制失败：" + (err?.message || err), "error");
         }
       } else {
         try {
           const count = await ImportNodesFromClipboard();
           if (count > 0) {
             setNodes(await GetNodes());
-            showToast(`已从剪贴板导入 ${count} 个节点`, 'success');
+            showToast(`已从剪贴板导入 ${count} 个节点`, "success");
           }
         } catch (err) {
-          showToast('导入失败：' + (err?.message || err), 'error');
+          showToast("导入失败：" + (err?.message || err), "error");
         }
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   });
 
   const handlePingAll = async () => {
@@ -1048,10 +1101,17 @@ export default function App() {
 
                   <div style={{ width: '1px', height: '40px', background: 'var(--border-subtle)' }} />
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '250px', flexShrink: 0 }}>
                     <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>TUN 模式</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+                      <span style={{
+                        fontSize: '11px',
+                        color: 'var(--text-tertiary)',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        flex: 1
+                      }}>
                         {tunPending === 'on'
                           ? '正在启动 TUN…'
                           : tunPending === 'off'
@@ -1060,7 +1120,7 @@ export default function App() {
                               ? '虚拟网卡接管全部流量 · 大陆直连'
                               : '虚拟网卡接管全部流量（需管理员）'}
                       </span>
-                      <label className="win11-toggle" title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
+                      <label className="win11-toggle" style={{ flexShrink: 0 }} title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
                         <input
                           type="checkbox"
                           checked={tunPending ? tunPending === 'on' : !!status.tunnelMode}
@@ -1181,6 +1241,64 @@ export default function App() {
               <div className="content-header" style={{ marginBottom: '4px' }}>
                 <div>
                   <h1 className="content-title">节点列表</h1>
+                  {selectedNodeIds.length > 0 ? (
+                    <p className="content-subtitle">
+                      已选中 {selectedNodeIds.length} 个节点 · 按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 批量测速 · 按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Esc</kbd> 取消选择
+                    </p>
+                  ) : (
+                    <p className="content-subtitle">
+                      快捷键：<kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+A</kbd> 全选 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+点击</kbd> 多选
+                    </p>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {selectedNodeIds.length > 0 ? (
+                    <>
+                      <button
+                        className="win11-btn primary"
+                        onClick={handlePingSelected}
+                        disabled={isPingingAll}
+                        title="真连接测速所有选中的节点（快捷键 Ctrl+R）"
+                      >
+                        <Gauge size={13} className={isPingingAll ? 'spin' : ''} />
+                        <span>{isPingingAll ? '测速中…' : `测速选中 (${selectedNodeIds.length})`}</span>
+                      </button>
+                      <button
+                        className="win11-btn"
+                        onClick={() => setSelectedNodeIds([])}
+                        title="取消多选（快捷键 Esc）"
+                      >
+                        <span>取消选择</span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="win11-btn"
+                        onClick={() => {
+                          const allIds = filteredNodes.map(n => n.id);
+                          setSelectedNodeIds(allIds);
+                          showToast(`已全选 ${allIds.length} 个节点（按 Ctrl+R 测速）`, 'info');
+                        }}
+                        title="全选当前列表节点（快捷键 Ctrl+A）"
+                      >
+                        <span>全选节点</span>
+                      </button>
+                      <button
+                        className="win11-btn"
+                        onClick={handlePingAll}
+                        disabled={isPingingAll}
+                        title="全部节点真连接测速"
+                      >
+                        <Zap size={13} className={isPingingAll ? 'spin' : ''} />
+                        <span>{isPingingAll ? '测速中…' : '全部测速'}</span>
+                      </button>
+                    </>
+                  )}
+                  <button className="win11-btn primary" onClick={() => setShowAddNodeModal(true)} title="手动添加单个节点">
+                    <Plus size={13} />
+                    <span>添加节点</span>
+                  </button>
                 </div>
               </div>
 
@@ -1188,21 +1306,52 @@ export default function App() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
                 {filteredNodes.map(node => {
                   const isSwitching = switchingNodeId === node.id;
+                  const isSelected = selectedNodeIds.includes(node.id);
+                  const isActive = !!node.active;
                   return (
                     <div
                       key={node.id}
                       className="win11-card"
-                      onClick={() => handleSelectNode(node.id)}
+                      onClick={(e) => {
+                        if (e.ctrlKey || e.metaKey) {
+                          // Ctrl+点击：加选/减选，不改变当前连接节点
+                          setSelectedNodeIds(ids => ids.includes(node.id)
+                            ? ids.filter(x => x !== node.id)
+                            : [...ids, node.id]);
+                          return;
+                        }
+                        if (e.shiftKey && selectedNodeIds.length > 0) {
+                          // Shift+点击：范围多选
+                          const lastId = selectedNodeIds[selectedNodeIds.length - 1];
+                          const lastIdx = filteredNodes.findIndex(n => n.id === lastId);
+                          const curIdx = filteredNodes.findIndex(n => n.id === node.id);
+                          if (lastIdx !== -1 && curIdx !== -1) {
+                            const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+                            const rangeIds = filteredNodes.slice(start, end + 1).map(n => n.id);
+                            setSelectedNodeIds(Array.from(new Set([...selectedNodeIds, ...rangeIds])));
+                            return;
+                          }
+                        }
+                        setSelectedNodeIds([node.id]);
+                        handleSelectNode(node.id);
+                      }}
                       style={{
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
                         padding: '12px 18px',
-                        cursor: node.active ? 'default' : 'pointer',
-                        border: node.active
-                          ? '2px solid var(--accent)'
+                        cursor: 'pointer',
+                        border: (isActive || isSelected)
+                          ? '1px solid var(--accent)'
                           : '1px solid var(--border-subtle)',
-                        background: node.active ? 'var(--accent-subtle)' : 'var(--bg-card)',
+                        boxShadow: (isActive || isSelected)
+                          ? '0 0 0 1px var(--accent)'
+                          : 'var(--shadow-card)',
+                        background: isActive
+                          ? 'var(--accent-subtle)'
+                          : isSelected
+                            ? 'rgba(0, 120, 212, 0.08)'
+                            : 'var(--bg-card)',
                         transition: 'all 0.15s ease'
                       }}
                     >
@@ -1211,7 +1360,11 @@ export default function App() {
                           width: '18px',
                           height: '18px',
                           borderRadius: '50%',
-                          border: node.active ? '5px solid var(--accent)' : '2px solid var(--border-default)',
+                          border: isActive
+                            ? '5px solid var(--accent)'
+                            : isSelected
+                              ? '4px solid var(--accent)'
+                              : '2px solid var(--border-default)',
                           backgroundColor: 'transparent',
                           transition: 'border 0.15s ease'
                         }} />
@@ -1219,6 +1372,22 @@ export default function App() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                             <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
                             <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>{node.name}</strong>
+                            {node.active && (
+                              <span style={{
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                color: 'var(--accent)',
+                                background: 'var(--accent-subtle)',
+                                border: '1px solid var(--accent-border)',
+                                padding: '1px 6px',
+                                borderRadius: '3px',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                lineHeight: '1.2'
+                              }}>
+                                活动
+                              </span>
+                            )}
                             {isSwitching && (
                               <span style={{ fontSize: '11px', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                                 <RefreshCw size={11} className="spin" /> 切换中…

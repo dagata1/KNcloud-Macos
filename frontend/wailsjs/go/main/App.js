@@ -22,6 +22,10 @@ export function DeleteNode(arg1) {
   return window['go']['main']['App']['DeleteNode'](arg1);
 }
 
+export function DeleteNodes(arg1) {
+  return window['go']['main']['App']['DeleteNodes'](arg1);
+}
+
 export function GetAccount() {
   return window['go']['main']['App']['GetAccount']();
 }
@@ -72,6 +76,10 @@ export function PingAllNodes() {
 
 export function PingNode(arg1) {
   return window['go']['main']['App']['PingNode'](arg1);
+}
+
+export function PingNodes(arg1) {
+  return window['go']['main']['App']['PingNodes'](arg1);
 }
 
 export function RefreshAccount() {

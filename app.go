@@ -472,15 +472,27 @@ func (a *App) UpdateNode(node NodeItem) error {
 	return nil
 }
 
-func (a *App) DeleteNode(id string) error {
+func (a *App) DeleteNodes(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	idMap := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idMap[id] = true
+	}
+
 	wasActive := false
 	var updated []NodeItem
+	deletedCount := 0
 	for _, n := range a.nodes {
-		if n.ID == id {
-			wasActive = n.Active
+		if idMap[n.ID] {
+			if n.Active {
+				wasActive = true
+			}
+			deletedCount++
 			continue
 		}
 		updated = append(updated, n)
@@ -511,10 +523,14 @@ func (a *App) DeleteNode(id string) error {
 			}
 		}
 	}
-	a.addLogInternal("warn", fmt.Sprintf("Node removed (ID: %s)", id))
+	a.addLogInternal("warn", fmt.Sprintf("Removed %d nodes", deletedCount))
 	a.savePersisted()
 	tray.requestRebuild()
 	return nil
+}
+
+func (a *App) DeleteNode(id string) error {
+	return a.DeleteNodes([]string{id})
 }
 
 func (a *App) PingNode(id string) int {
@@ -546,6 +562,14 @@ func (a *App) PingNode(id string) int {
 	}
 	a.mu.Unlock()
 
+	// 实时推送当前节点的真连接测速结果给前端，实现先测完先显示
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "kncloud:node-delay", map[string]interface{}{
+			"id":    id,
+			"delay": latency,
+		})
+	}
+
 	if latency == -2 {
 		a.addLogInternal("warn", fmt.Sprintf("Real-connection test failed for node [%s] (timeout or unreachable)", target.Name))
 	} else {
@@ -554,28 +578,54 @@ func (a *App) PingNode(id string) int {
 	return latency
 }
 
-func (a *App) PingAllNodes() []NodeItem {
+func (a *App) PingNodes(ids []string) []NodeItem {
+	if len(ids) == 0 {
+		return a.GetNodes()
+	}
+	idMap := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idMap[id] = true
+	}
+
 	a.mu.RLock()
-	nodesCopy := make([]NodeItem, len(a.nodes))
-	copy(nodesCopy, a.nodes)
+	var targets []string
+	for _, n := range a.nodes {
+		if idMap[n.ID] {
+			targets = append(targets, n.ID)
+		}
+	}
 	a.mu.RUnlock()
 
-	// 并发真连接测速，最多同时 5 个临时实例
+	if len(targets) == 0 {
+		return a.GetNodes()
+	}
+
+	// 并发真连接测速，最多同时 3 个临时实例
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5)
-	for _, node := range nodesCopy {
+	sem := make(chan struct{}, 3)
+	for _, id := range targets {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(id string) {
+		go func(nodeID string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			a.PingNode(id)
-		}(node.ID)
+			a.PingNode(nodeID)
+		}(id)
 	}
 	wg.Wait()
 
-	a.addLogInternal("info", "Real-connection latency test completed for all nodes")
+	a.addLogInternal("info", fmt.Sprintf("Real-connection latency test completed for %d selected nodes", len(targets)))
 	return a.GetNodes()
+}
+
+func (a *App) PingAllNodes() []NodeItem {
+	a.mu.RLock()
+	allIDs := make([]string, 0, len(a.nodes))
+	for _, n := range a.nodes {
+		allIDs = append(allIDs, n.ID)
+	}
+	a.mu.RUnlock()
+	return a.PingNodes(allIDs)
 }
 
 // ------------------------- Core & Proxy APIs -------------------------

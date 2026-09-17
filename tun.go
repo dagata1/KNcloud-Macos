@@ -40,20 +40,21 @@ const (
 	createNoWindow = 0x08000000
 
 	// SSTap 方案核心参数（复刻 SSTap-beta 的 TAP 分流机制）
-	tunIfaceName = "KNcloud-TAP"          // 固定虚拟网卡名（对应 SSTAP 1）
-	tunGateway   = "172.19.0.1"           // 虚拟网卡网关地址（/30）
-	tunDnsAddr   = "198.18.0.2"           // 写入虚拟网卡的系统 DNS，端口 53 被 sing-box 劫持
-	tunMetric    = 1                      // 虚拟网卡接口 metric（对应 SSTap 抢占 DNS 优先级）
-	routeMetric  = 5                      // 分流路由 metric
-	tunGateway6  = "fdfe:dcba:9876::1"    // 虚拟网卡 IPv6 地址（/126），配合 2000::/3 分流路由堵 IPv6 泄漏
+	tunIfaceName = "KNcloud-TAP"       // 固定虚拟网卡名（对应 SSTAP 1）
+	tunGateway   = "172.19.0.1"        // 虚拟网卡网关地址（/30）
+	tunDnsAddr   = "198.18.0.2"        // 写入虚拟网卡的系统 DNS，端口 53 被 sing-box 劫持
+	tunMetric    = 1                   // 虚拟网卡接口 metric（对应 SSTap 抢占 DNS 优先级）
+	routeMetric  = 5                   // 分流路由 metric
+	tunGateway6  = "fdfe:dcba:9876::1" // 虚拟网卡 IPv6 地址（/126），配合 2000::/3 分流路由堵 IPv6 泄漏
 )
 
 var (
-	iphlpapi                 = windows.NewLazySystemDLL("iphlpapi.dll")
-	procGetBestRoute         = iphlpapi.NewProc("GetBestRoute")
-	procGetIpForwardTable    = iphlpapi.NewProc("GetIpForwardTable")
-	procCreateIpForwardEntry = iphlpapi.NewProc("CreateIpForwardEntry")
-	procDeleteIpForwardEntry = iphlpapi.NewProc("DeleteIpForwardEntry")
+	iphlpapi                        = windows.NewLazySystemDLL("iphlpapi.dll")
+	procGetBestRoute                = iphlpapi.NewProc("GetBestRoute")
+	procGetIpForwardTable           = iphlpapi.NewProc("GetIpForwardTable")
+	procCreateIpForwardEntry        = iphlpapi.NewProc("CreateIpForwardEntry")
+	procDeleteIpForwardEntry        = iphlpapi.NewProc("DeleteIpForwardEntry")
+	procConvertInterfaceLuidToIndex = iphlpapi.NewProc("ConvertInterfaceLuidToIndex")
 )
 
 // 保留网段：永不写入虚拟网卡（私有/链路本地/组播等，保持系统直连行为）

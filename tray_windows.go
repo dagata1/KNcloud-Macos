@@ -184,7 +184,7 @@ func (t *trayController) buildMenu() {
 	miRouting := systray.AddMenuItem("路由模式", "切换分流策略")
 	// 策略对 TUN 分流同样生效（sstap.go 规则引擎），TUN 运行时不再置灰
 	for _, m := range []struct{ id, label string }{
-		{"bypass-cn", "绕过大陆 (GFWList & CN)"},
+		{"bypass-cn", "绕过大陆"},
 		{"global", "全局代理"},
 		{"direct", "全局直连"},
 	} {
