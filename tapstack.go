@@ -794,7 +794,7 @@ func (a *App) tunReapplyRoutesLocked() error {
 			return ""
 		}
 		return tunDnsAddr
-	}())
+	}(), a.settings.DnsServers)
 	if rtErr != nil {
 		return rtErr
 	}
@@ -1047,15 +1047,10 @@ func (a *App) removeTapRouting() {
 			a.addLogInternal("warn", fmt.Sprintf("Failed to sweep TUN routes on ifIdx=%d: %v", idx, err))
 		}
 	}
-	// DNS 复位：只有 Go 路径设置过劫持 DNS。netsh ~0.2s（PowerShell 要 5s）。
-	if a.tapDnsHijacked {
-		a.tapDnsHijacked = false
-		out, err := runHidden("netsh", "interface", "ipv4", "delete", "dnsservers",
-			fmt.Sprintf("name=%d", idx), "source=all")
-		if err != nil {
-			vlog("reset adapter DNS (ifIdx=%d): %v: %s", idx, err, strings.TrimSpace(string(out)))
-		}
-	}
+	// DNS 复位：只要网卡上可能残留劫持 DNS 就清一次（Go 路径设过、或上一轮
+	// 运行留下的）。原判断条件 tapDnsHijacked 漏掉了「本进程没设但网卡已被设过」
+	// 的情况 —— 那会让 198.18.0.2 一直留在常驻网卡上，把 DNS 打进黑洞。
+	clearTapAdapterDNS(idx)
 	// IPv6 防泄漏路由必须每次都回收（它不在分流路由记账里），同样走 netsh 快删
 	removeTunIPv6RouteFast(idx)
 }
@@ -1110,7 +1105,7 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		// Prefer the native C/lwIP tun2socks engine used by SSTap. It consumes the
 		// installed TAP-Windows adapter directly and avoids the Go/gVisor path.
 		if err := a.startNativeTun(*node); err == nil {
-			hostRoutes, splitRoutes, nRouted, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, nativeSSTapRouterIP, "")
+			hostRoutes, splitRoutes, nRouted, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, nativeSSTapRouterIP, "", a.settings.DnsServers)
 			a.tunHostRoutes = hostRoutes
 			a.tunSplitRoutes = splitRoutes
 			if rtErr != nil {
@@ -1144,7 +1139,7 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		// 3) 铺路由（DNS 劫持 + 节点 /32 防回环 + 按策略分流）并启动转发
 		// Go 路径会给网卡设置劫持 DNS（198.18.0.2），停止时需复位
 		a.tapDnsHijacked = true
-		hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
+		hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode, a.settings.DnsServers)
 		a.tunHostRoutes = hostRoutes
 		a.tunSplitRoutes = splitRoutes
 		if rtErr != nil {

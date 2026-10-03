@@ -70,13 +70,30 @@ func runTunSelfTest(a *App) int {
 	} else {
 		fmt.Printf("[ OK ] adapter %s present\n", wantAdapter)
 	}
-	r, ok := bestRouteForIPv4(net.ParseIP("8.8.8.8"), 0)
+	// 1a) 去往海外的最优路由应指向 TUN 网卡。
+	//     例外：DNS 服务器（1.1.1.1 / 8.8.8.8 等）按设计走物理直连 —— TUN 的 UDP
+	//     经 tun2socks SOCKS UDP ASSOCIATE 转发有连接池上限，打满后会持续丢包，
+	//     导致域名解析全失败。所以这里挑一个不是 DNS 的海外地址来验证。
+	const probeIP = "9.9.9.10"
+	r, ok := bestRouteForIPv4(net.ParseIP(probeIP), 0)
 	if !ok || r.IfIndex != idx || r.Mask == 0 {
-		fmt.Printf("[FAIL] best route to 8.8.8.8: ifIdx=%d gw=%v (want TUN ifIdx=%d, non-default prefix)\n",
-			r.IfIndex, dwordToIP(r.NextHop), idx)
+		fmt.Printf("[FAIL] best route to %s: ifIdx=%d gw=%v (want TUN ifIdx=%d, non-default prefix)\n",
+			probeIP, r.IfIndex, dwordToIP(r.NextHop), idx)
 		fail++
 	} else {
-		fmt.Printf("[ OK ] 8.8.8.8 routed via TUN (ifIdx=%d gw=%v mask=%08x)\n", r.IfIndex, dwordToIP(r.NextHop), r.Mask)
+		fmt.Printf("[ OK ] %s routed via TUN (ifIdx=%d gw=%v mask=%08x)\n", probeIP, r.IfIndex, dwordToIP(r.NextHop), r.Mask)
+	}
+	// 1b-2) DNS 服务器必须走物理直连（否则 UDP 池打满 -> DNS 全挂）
+	dnsDirect := true
+	for _, dnsIP := range []string{"1.1.1.1", "8.8.8.8", "223.5.5.5"} {
+		if dr, dok := bestRouteForIPv4(net.ParseIP(dnsIP), 0); !dok || dr.IfIndex == idx {
+			fmt.Printf("[FAIL] DNS %s not routed direct (ifIdx=%d)\n", dnsIP, dr.IfIndex)
+			dnsDirect = false
+			fail++
+		}
+	}
+	if dnsDirect {
+		fmt.Println("[ OK ] DNS servers routed direct (bypass TUN UDP pool)")
 	}
 
 	// 1b) IPv6 防泄漏：2000::/3 送进 TUN 网卡。
@@ -149,11 +166,11 @@ func runTunSelfTest(a *App) int {
 	} else {
 		fmt.Printf("[ OK ] adapter %s removed\n", wantAdapter)
 	}
-	if r2, ok2 := bestRouteForIPv4(net.ParseIP("8.8.8.8"), 0); !ok2 || r2.IfIndex == idx {
-		fmt.Printf("[FAIL] stale route to 8.8.8.8 via ifIdx=%d after stop\n", r2.IfIndex)
+	if r2, ok2 := bestRouteForIPv4(net.ParseIP(probeIP), 0); !ok2 || r2.IfIndex == idx {
+		fmt.Printf("[FAIL] stale route to %s via ifIdx=%d after stop\n", probeIP, r2.IfIndex)
 		fail++
 	} else {
-		fmt.Printf("[ OK ] routes restored (8.8.8.8 via ifIdx=%d gw=%v)\n", r2.IfIndex, dwordToIP(r2.NextHop))
+		fmt.Printf("[ OK ] routes restored (%s via ifIdx=%d gw=%v)\n", probeIP, r2.IfIndex, dwordToIP(r2.NextHop))
 	}
 	a.mu.RLock()
 	singboxGone := a.tunCmd == nil && a.tunJob == 0 && a.tunIfaceIdx == 0 && len(a.tunHostRoutes) == 0 && len(a.tunSplitRoutes) == 0 && a.nativeTunCmd == nil

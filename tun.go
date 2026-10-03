@@ -646,6 +646,19 @@ func lookupNodeIPv4sCached(host string) []net.IP {
 	return ips
 }
 
+// clearTapAdapterDNS 清空网卡上残留的静态 DNS（回 DHCP）。
+// 返回是否真的清掉了东西。
+func clearTapAdapterDNS(ifIdx uint32) bool {
+	// 参数是 address=all（不是 source=all —— 后者会被 netsh 判为非法参数）
+	out, err := runHidden("netsh", "interface", "ipv4", "delete", "dnsservers",
+		fmt.Sprintf("name=%d", ifIdx), "address=all")
+	if err != nil {
+		vlog("clear adapter DNS (ifIdx=%d): %v: %s", ifIdx, err, strings.TrimSpace(string(out)))
+		return false
+	}
+	return !adapterHasDns(ifIdx, tunDnsAddr)
+}
+
 // adapterHasDns 回读校验网卡是否真的配置了指定 DNS
 // （netsh 参数写错时退出码仍为 0，只能靠回读确认）
 func adapterHasDns(ifIdx uint32, want string) bool {
@@ -683,14 +696,69 @@ func rangeToCIDRs(start, end uint64) []net.IPNet {
 	return out
 }
 
-// computeBypassRoutes 计算需要送进虚拟网卡的 CIDR 列表 =
-// 全网空间 - 中国大陆 IP（geo/cn-routes.txt）- 保留网段
-// 等价 SSTap「Skip all China IP」规则集生成的路由表
 // computeBypassRoutes 绕过大陆策略的分流路由（非中国大陆 CIDR 全集）。
-// 计算逻辑已迁移到 sstap.go 的策略引擎（sstapPolicyRoutes）。
+// 计算逻辑在 sstap.go 的策略引擎（sstapPolicyRoutes）；这里保留给测试与旧调用方。
 func computeBypassRoutes() []net.IPNet {
 	routes, _ := sstapPolicyRoutes("bypass-cn")
 	return routes
+}
+
+// addDnsBypassRoutes 给配置的 DNS 服务器写 /32 直连路由，让 DNS 查询走物理网卡
+// 而不是进 TUN。
+//
+// 为什么必须这样：DNS 全是 UDP/53。TUN 的 UDP 经 tun2socks 的 SOCKS UDP
+// ASSOCIATE 转发，其连接池有上限，打满后会持续「Dropping UDP packet」，于是
+// 所有域名解析失败。表现为 TCP 正常（Google 能开）但任何需要解析的站点全挂，
+// TLS 还会因拿不到证书吊销信息报 CRYPT_E_REVOCATION_OFFLINE。
+//
+// 顺带的好处：DNS 不进隧道，也就不必依赖 TUN 的 UDP 转发；泄露的是 DNS
+// 查询而非数据流量，与「系统代理」模式的行为一致。
+func addDnsBypassRoutes(dnsList string) []mibIPForwardRow {
+	var out []mibIPForwardRow
+	for _, s := range strings.Split(dnsList, ",") {
+		s = strings.TrimSpace(s)
+		ip := net.ParseIP(s)
+		if ip == nil {
+			continue
+		}
+		v4 := ip.To4()
+		if v4 == nil {
+			continue
+		}
+		base, ok := getBestRoute(v4)
+		if !ok {
+			vlog("dns bypass: no base route for %s, skipped", v4)
+			continue
+		}
+		row := mibIPForwardRow{
+			Dest:    ipToDword(v4),
+			Mask:    0xFFFFFFFF,
+			NextHop: base.NextHop,
+			IfIndex: base.IfIndex,
+			Type:    base.Type,
+		}
+		if row.Type != ipRouteTypeDirect && row.Type != ipRouteTypeIndirect {
+			if row.NextHop == 0 {
+				row.Type = ipRouteTypeDirect
+			} else {
+				row.Type = ipRouteTypeIndirect
+			}
+		}
+		m := interfaceMetric4(base.IfIndex)
+		row.Metric1 = base.Metric1
+		if m > 0 {
+			row.Metric1 = m + 1
+		}
+		if err := addRouteRow(&row); err != nil && syscall.Errno(5010) != err {
+			vlog("dns bypass: add /32 for %s failed: %v", v4, err)
+			continue
+		}
+		out = append(out, row)
+	}
+	if len(out) > 0 {
+		vlog("dns bypass: %d DNS server(s) routed direct", len(out))
+	}
+	return out
 }
 
 // tunVerbose 自检（--tun-selftest）时输出的逐步日志；正常运行保持安静
@@ -706,14 +774,14 @@ func vlog(format string, args ...interface{}) {
 // policy 决定分流路由集合（bypass-cn / global / proxy-cn / sstap:<rules 文件>）。
 // 返回写入物理网卡的节点直连路由（断开时需回收）、写入 TUN 网卡的分流路由记账
 // （断开时按记账删除）与 TUN 上生效的分流路由条数。
-func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes []mibIPForwardRow, splitRoutes []splitRouteEntry, routed int, err error) {
-	return applySstapRoutingWithGateway(node, tunIdx, policy, tunGateway, tunDnsAddr)
+func applySstapRouting(node NodeItem, tunIdx uint32, policy, dnsServers string) (hostRoutes []mibIPForwardRow, splitRoutes []splitRouteEntry, routed int, err error) {
+	return applySstapRoutingWithGateway(node, tunIdx, policy, tunGateway, tunDnsAddr, dnsServers)
 }
 
 // applySstapRoutingWithGateway applies the same SSTap CIDR routing policy to a
 // specific TAP adapter topology. Native SSTap uses a different gateway and does
 // not expose the sing-box fake DNS listener.
-func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway, dnsAddr string) (hostRoutes []mibIPForwardRow, splitRoutes []splitRouteEntry, routed int, err error) {
+func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway, dnsAddr, dnsServers string) (hostRoutes []mibIPForwardRow, splitRoutes []splitRouteEntry, routed int, err error) {
 	hidden := &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	tAll := time.Now()
 	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）。
@@ -755,8 +823,17 @@ func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway,
 		}
 	}
 
-	// 1b) 系统 DNS 指向劫持地址（仅 Go 路径需要：它靠 198.18.0.2 把 DNS 送进协议栈；
-	//     原生 tun2socks 路径没有 DNS 劫持监听，无需改系统 DNS，也省掉一次 PowerShell）。
+	// 1b) 系统 DNS 指向劫持地址（仅 Go 路径需要：它靠 198.18.0.2 把 DNS 送进协议栈）。
+	//
+	// 原生 tun2socks 路径没有 DNS 劫持监听器，此时必须**显式清空**网卡 DNS：
+	// 上一次若走过 Go 路径（或旧版本）会在网卡上留下 198.18.0.2，残留会让所有
+	// DNS 查询打进无人应答的 TUN，表现为「能建连但 TLS 全部失败」
+	// （CRYPT_E_REVOCATION_OFFLINE），而且网卡常驻、不清理就永久生效。
+	if dnsAddr == "" {
+		if clearTapAdapterDNS(tunIdx) {
+			vlog("native path: cleared stale DNS on adapter ifIdx=%d", tunIdx)
+		}
+	}
 	if dnsAddr != "" {
 		// netsh 的 set dnsservers 只认 name=（不认 interface=），且参数写错时退出码仍是 0，
 		// 所以必须回读校验，不能只看 err —— 否则 DNS 静默没设上。
@@ -783,6 +860,11 @@ func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway,
 		}
 		splitRoutes = append(splitRoutes, splitRouteEntry{Dest: ipToDword(dnsNet.IP), Mask: ipToDword(net.IP(dnsNet.Mask)), NextHop: ipToDword(gw), IfIndex: tunIdx})
 	}
+
+	// 2b) 无论是否劫持 DNS，都给配置的 DNS 服务器写 /32 直连路由。
+	// DNS 全走 UDP，TUN 的 UDP 经 tun2socks SOCKS UDP ASSOCIATE 转发，连接池
+	// 打满后会持续丢包（Dropping UDP packet），导致域名解析全失败。详见函数注释。
+	hostRoutes = append(hostRoutes, addDnsBypassRoutes(dnsServers)...)
 
 	// 3) 节点服务器 IP 写 /32 直连路由防回环（沿系统真实最优路由，支持 on-link 网关/PPPoE）
 	var lastAddErr error
@@ -1179,7 +1261,7 @@ func (a *App) startTunLocked(isRetry bool) error {
 	a.tunIfaceIdx = ifIdx
 
 	// SSTap 方案核心步骤：metric/DNS 劫持 + 服务器防回环路由 + 按当前策略写分流路由
-	hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
+	hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode, a.settings.DnsServers)
 	a.tunHostRoutes = hostRoutes
 	a.tunSplitRoutes = splitRoutes
 	if rtErr != nil {
@@ -1460,7 +1542,7 @@ func (a *App) reapplyTunRoutesLocked() (bool, error) {
 	if !(a.tunWarm && a.tunCmd != nil && a.tunIfaceIdx != 0 && tunNodeMatches(a.tunWarmNode, *node)) {
 		return false, fmt.Errorf("no usable warm standby")
 	}
-	hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx, a.routingMode)
+	hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx, a.routingMode, a.settings.DnsServers)
 	a.tunHostRoutes = hostRoutes
 	a.tunSplitRoutes = splitRoutes
 	if rtErr != nil {
