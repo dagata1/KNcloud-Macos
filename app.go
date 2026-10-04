@@ -1038,17 +1038,23 @@ func (a *App) cleanup() {
 		return
 	}
 	a.cleaned = true
-	defer a.mu.Unlock()
+	proxyOn := a.systemProxy
+	a.systemProxy = false
+	// 先释放 a.mu：stopWebLogin 内部会再次获取该锁，RWMutex 不可重入，
+	// 持有锁调用会直接死锁（表现为退出时进程卡住）。
+	a.mu.Unlock()
 
-	if a.systemProxy {
+	if proxyOn {
 		setWindowsSystemProxy(false, "")
-		a.systemProxy = false
 	}
 	a.stopWebLogin()
+
+	a.mu.Lock()
 	a.stopCoreLocked()
 	// tapstack：停转发 + 撤路由；常驻网卡保留在系统里（与 SSTap 的 TAP 一致）
 	a.tunSoftStopLocked()
 	a.savePersisted()
+	a.mu.Unlock()
 }
 
 // quitApp 真正退出程序：托盘菜单「退出」与窗口关闭（未开启最小化到托盘）都会走这里。

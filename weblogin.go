@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,6 +37,10 @@ type webLoginManager struct {
 	ln   net.Listener
 	srv  *http.Server
 	done chan *webLoginResult
+	// id 标识当前生效的 session。重复发起登录会换掉 done 通道，
+	// 旧 goroutine 超时后若仍调用 stopWebLogin() 会把新 session 一起关掉，
+	// 导致新登录误报超时。带上 id 后只关闭自己那一轮。
+	id int64
 }
 
 func (m *webLoginManager) stopLocked() {
@@ -77,6 +82,7 @@ func (a *App) StartWebLogin() (string, error) {
 	}
 	resCh := make(chan *webLoginResult, 1)
 	port := ln.Addr().(*net.TCPAddr).Port
+	sessionID := time.Now().UnixNano()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -100,6 +106,7 @@ func (a *App) StartWebLogin() (string, error) {
 	m.ln = ln
 	m.srv = srv
 	m.done = resCh
+	m.id = sessionID
 	m.mu.Unlock()
 
 	go func() { _ = srv.Serve(ln) }()
@@ -120,7 +127,9 @@ func (a *App) StartWebLogin() (string, error) {
 		case <-time.After(webLoginTimeout):
 			res = nil
 		}
-		a.stopWebLogin()
+		// 只关闭自己这一轮 session：重复发起登录时旧 goroutine 若仍调用
+		// stopWebLogin() 会把新 session 一起关掉，导致新登录误报超时。
+		a.stopWebLoginSession(sessionID)
 
 		ctx := a.appCtx()
 		if res == nil {
@@ -166,17 +175,37 @@ func (a *App) stopWebLogin() {
 	m.stopLocked()
 }
 
+// stopWebLoginSession 只关闭指定 id 的 session。
+// 重复发起登录时，旧 goroutine 超时后不应把新 session 一起关掉。
+func (a *App) stopWebLoginSession(id int64) {
+	a.mu.Lock()
+	m := a.webLogin
+	a.mu.Unlock()
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.id != id {
+		return // 已被更新的 session 取代，不动
+	}
+	m.stopLocked()
+}
+
 func openInDefaultBrowser(rawURL string) error {
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
 }
 
-// webLoginHTML 回调落地页：告知用户授权结果并引导返回客户端
+// webLoginHTML 回调落地页：告知用户授权结果并引导返回客户端。
+// msg 必须转义：虽然当前调用点都是硬编码文案，但 token/email 来自 URL 参数，
+// 一旦将来把它们拼进 msg 就会形成 XSS。
 func webLoginHTML(msg string) string {
+	safe := html.EscapeString(msg)
 	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width,initial-scale=1">` +
 		`<title>KNcloud-WIN 授权</title></head>` +
 		`<body style="display:flex;align-items:center;justify-content:center;height:100vh;margin:0;` +
 		`font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:#181818;color:#fff;">` +
 		`<div style="text-align:center;"><div style="font-size:20px;font-weight:600;margin-bottom:12px;">KNcloud-WIN</div>` +
-		`<div style="font-size:14px;opacity:.8;">` + msg + `</div></div></body></html>`
+		`<div style="font-size:14px;opacity:.8;">` + safe + `</div></div></body></html>`
 }

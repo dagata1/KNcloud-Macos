@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -130,6 +131,7 @@ func settingsHasKey(data []byte, key string) bool {
 }
 
 // savePersisted 将当前状态写入磁盘。调用方需已持有写锁（或在无并发场景调用）。
+// 失败时记录日志并清理临时文件，避免残留 .tmp 影响下次写入。
 func (a *App) savePersisted() {
 	path := configFilePath()
 	if path == "" {
@@ -147,11 +149,18 @@ func (a *App) savePersisted() {
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Failed to marshal config: %v", err))
 		return
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Failed to write config tmp file: %v", err))
 		return
 	}
-	_ = os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		// 清理残留的临时文件，避免下次写入时混淆
+		_ = os.Remove(tmp)
+		a.addLogInternal("error", fmt.Sprintf("Failed to save config: %v", err))
+		return
+	}
 }

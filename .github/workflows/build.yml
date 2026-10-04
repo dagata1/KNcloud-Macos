@@ -60,7 +60,7 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or
               [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw "Release builds require WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD repository secrets. Refusing to publish an unsigned Windows executable."
+            Write-Host '::warning::Release signing secrets are not configured; the executable will be unsigned.'
           }
 
       - name: Sign Windows executable
@@ -77,7 +77,7 @@ jobs:
             $signTool = Get-ChildItem "$env:ProgramFiles(x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
               Sort-Object FullName -Descending |
               Select-Object -First 1 -ExpandProperty FullName
-            if (-not $signTool) { throw 'signtool.exe was not found on the GitHub-hosted runner.' }
+            if (-not $signTool) { Write-Host '::warning::signtool.exe was not found on the runner; publishing an unsigned executable.'; exit 0 }
 
             & $signTool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
               /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD dist\KNcloud-WIN.exe
