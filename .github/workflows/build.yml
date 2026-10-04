@@ -72,6 +72,7 @@ jobs:
         run: |
           $certificatePath = Join-Path $env:RUNNER_TEMP 'kncloud-windows-signing.pfx'
           try {
+            if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) { Write-Host '::warning::Release signing secrets are not configured; publishing unsigned.'; return 0 }
             [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
 
             $signTool = Get-ChildItem "$env:ProgramFiles(x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
