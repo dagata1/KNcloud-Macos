@@ -21,10 +21,17 @@ func main() {
 		os.Exit(runTunSelfTest(app))
 	}
 
+	// 根据持久化设置确定初始窗口尺寸，避免启动时先闪一下大窗口再缩小
+	// （窗口默认按 classic 尺寸创建，简易模式/登录页会先显示大窗口再缩小）
+	width, height := 1120, 760
+	if !app.account.LoggedIn || app.settings.UiMode == "simple" {
+		width, height = 420, 640
+	}
+
 	err := wails.Run(&options.App{
 		Title:     "KNcloud-WIN",
-		Width:     1120,
-		Height:    760,
+		Width:     width,
+		Height:    height,
 		MinWidth:  380,  // 简易模式需要缩到紧凑尺寸（前端切换模式时自动调整）
 		MinHeight: 560,
 		Frameless: true, // 自定义 Win11 沉浸式标题栏

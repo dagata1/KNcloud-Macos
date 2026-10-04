@@ -26,7 +26,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -785,7 +784,7 @@ func (a *App) tunReapplyRoutesLocked() error {
 		return fmt.Errorf("no node selected")
 	}
 	a.removeTapRouting()
-	hostRoutes, _, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, func() string {
+	hostRoutes, splitRoutes, _, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, func() string {
 		if a.nativeTunRunning() {
 			return nativeSSTapRouterIP
 		}
@@ -800,9 +799,10 @@ func (a *App) tunReapplyRoutesLocked() error {
 		return rtErr
 	}
 	a.tunHostRoutes = hostRoutes
-	if !a.nativeTunRunning() {
-		_ = addTunIPv6Route(a.tunIfaceIdx)
-	}
+	a.tunSplitRoutes = splitRoutes
+	// addTunIPv6Route 内部判断网卡是否配了 IPv6 地址：Go 路径有会写，
+	// 原生 tun2socks 只配 IPv4 则跳过（写了也是无效路由）。
+	_ = addTunIPv6Route(a.tunIfaceIdx)
 	return nil
 }
 
@@ -811,6 +811,7 @@ func (a *App) tunSoftStopLocked() {
 	a.stopNativeTun()
 	a.stopTapForwarding()
 	a.removeTapRouting()
+	a.tunIfaceIdx = 0
 	if a.tunRunning {
 		a.tunRunning = false
 		a.addLogInternal("info", "TUN stopped, all traffic back to direct (adapter kept installed)")
@@ -952,22 +953,73 @@ func bindToIfaceControl(ifIdx uint32) func(network, address string, c syscall.Ra
 
 // ------------------------- 适配器网络配置 -------------------------
 
-// configureTapAdapter 给常驻网卡配 IP/DNS/metric（幂等：重复执行无副作用）
+// configureTapAdapter 给常驻网卡配 IP/metric（幂等）。
+//
+// 原实现是一条 PowerShell 命令跑 4 个操作，且每次开 TUN 都执行一遍，耗时 4~5 秒
+// （PowerShell 启动 + NetTCPIP 模块加载）。这正是「开 TUN 很慢」的真正来源 ——
+// 自检走原生 tun2socks 路径不经过这里，所以自检数字偏乐观。
+//
+// 现在：metric 用 IP Helper API（一次系统调用，且值已对时直接跳过）；
+// IP 地址常驻网卡配置一次后长期有效，缺失才补。
 func configureTapAdapter(ifIdx uint32) error {
-	hidden := &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		fmt.Sprintf(
-			"New-NetIPAddress -InterfaceIndex %d -IPAddress %s -PrefixLength 30 -ErrorAction SilentlyContinue; "+
-				"New-NetIPAddress -InterfaceIndex %d -IPAddress %s -PrefixLength 126 -ErrorAction SilentlyContinue; "+
-				"Set-NetIPInterface -InterfaceIndex %d -InterfaceMetric %d; "+
-				"Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses '%s'",
-			ifIdx, tunGateway,
-			ifIdx, tunGateway6,
-			ifIdx, tunMetric,
-			ifIdx, tunDnsAddr))
-	ps.SysProcAttr = hidden
-	if out, err := ps.CombinedOutput(); err != nil {
-		return fmt.Errorf("configure adapter: %v: %s", err, strings.TrimSpace(string(out)))
+	ifaceRow := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: ifIdx}
+	if err := windows.GetIpInterfaceEntry(&ifaceRow); err != nil {
+		return fmt.Errorf("read adapter metric (ifIdx=%d): %w", ifIdx, err)
+	}
+	if ifaceRow.Metric != tunMetric {
+		set := ifaceRow
+		set.SitePrefixLength = 0
+		set.ZoneIndices = [windows.ScopeLevelCount]uint32{}
+		set.Metric = tunMetric
+		if r, _, _ := procSetIpInterfaceEntry.Call(uintptr(unsafe.Pointer(&set))); r != 0 {
+			// API 失败退回 netsh（比 PowerShell 快一个数量级）
+			out, err := runHidden("netsh", "interface", "ipv4", "set", "interface",
+				fmt.Sprintf("interface=%d", ifIdx), fmt.Sprintf("metric=%d", tunMetric))
+			if err != nil {
+				return fmt.Errorf("set adapter metric (ifIdx=%d, winerr %d): %v: %s",
+					ifIdx, r, err, strings.TrimSpace(string(out)))
+			}
+		}
+	}
+	return ensureTapAddrs(ifIdx)
+}
+
+// ensureTapAddrs 确保常驻网卡已配置 tunGateway/30 与 tunGateway6/126，未配置才补。
+// 常驻网卡配置一次后长期有效，所以只在缺失时调用 netsh（~0.3s，远快于 PowerShell 的 5s）。
+func ensureTapAddrs(ifIdx uint32) error {
+	iface, err := net.InterfaceByIndex(int(ifIdx))
+	if err != nil {
+		return fmt.Errorf("lookup adapter ifIdx=%d: %w", ifIdx, err)
+	}
+	addrs, _ := iface.Addrs()
+	hasV4, hasV6 := false, false
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		switch n.IP.String() {
+		case tunGateway:
+			hasV4 = true
+		case tunGateway6:
+			hasV6 = true
+		}
+	}
+	if !hasV4 {
+		out, err := runHidden("netsh", "interface", "ipv4", "set", "address",
+			fmt.Sprintf("interface=%d", ifIdx), "source=static", tunGateway,
+			"mask=255.255.255.252")
+		if err != nil {
+			return fmt.Errorf("assign adapter IPv4 (ifIdx=%d): %v: %s", ifIdx, err, strings.TrimSpace(string(out)))
+		}
+	}
+	// IPv6 地址是 2000::/3 防泄漏路由的下一跳，缺了这条路由就写不了
+	if !hasV6 {
+		out, err := runHidden("netsh", "interface", "ipv6", "add", "address",
+			fmt.Sprintf("interface=%d", ifIdx), tunGateway6+"/126", "store=active")
+		if err != nil {
+			return fmt.Errorf("assign adapter IPv6 (ifIdx=%d): %v: %s", ifIdx, err, strings.TrimSpace(string(out)))
+		}
 	}
 	return nil
 }
@@ -977,20 +1029,48 @@ func (a *App) removeTapRouting() {
 	if n := removeHostRoutes(&a.tunHostRoutes); n > 0 {
 		a.addLogInternal("info", fmt.Sprintf("Removed %d node host routes", n))
 	}
-	if idx := a.tunIfaceIdx; idx != 0 {
-		if n := deleteRoutesOnInterface(idx); n > 0 {
-			a.addLogInternal("info", fmt.Sprintf("Removed %d split routes", n))
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		psCmd := fmt.Sprintf(
-			"Remove-NetRoute -InterfaceIndex %d -DestinationPrefix '2000::/3' -Confirm:$false -ErrorAction SilentlyContinue; "+
-				"Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses -ErrorAction SilentlyContinue",
-			idx, idx)
-		ps := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd)
-		ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-		_ = ps.Run()
+	// 快路径：按记账逐条删（一次 DeleteIpForwardEntry 一条，微秒级）。
+	// 内置策略只写 2 条默认路由 + 1 条 DNS 劫持路由，删除成本可忽略。
+	removed, want := a.dropSplitRoutesFast()
+	if removed > 0 {
+		a.addLogInternal("info", fmt.Sprintf("Removed %d/%d TUN split routes", removed, want))
 	}
+	idx := a.tunIfaceIdx
+	if idx == 0 {
+		return
+	}
+	// 记账里没有的残留（上次异常退出留下的）：只有删掉的比记账少时才全网卡扫描。
+	// 扫描必须走 PowerShell（新版 IP Helper 才看得见断开网卡上的路由），约 5 秒，
+	// 所以尽量不触发。
+	if removed < want {
+		if err := removeTapRoutesBulk(idx); err != nil {
+			a.addLogInternal("warn", fmt.Sprintf("Failed to sweep TUN routes on ifIdx=%d: %v", idx, err))
+		}
+	}
+	// DNS 复位：只有 Go 路径设置过劫持 DNS。netsh ~0.2s（PowerShell 要 5s）。
+	if a.tapDnsHijacked {
+		a.tapDnsHijacked = false
+		out, err := runHidden("netsh", "interface", "ipv4", "delete", "dnsservers",
+			fmt.Sprintf("name=%d", idx), "source=all")
+		if err != nil {
+			vlog("reset adapter DNS (ifIdx=%d): %v: %s", idx, err, strings.TrimSpace(string(out)))
+		}
+	}
+	// IPv6 防泄漏路由必须每次都回收（它不在分流路由记账里），同样走 netsh 快删
+	removeTunIPv6RouteFast(idx)
+}
+
+// dropSplitRoutesFast 按记账逐条删除分流路由，返回 (已删除条数, 记账条数)
+func (a *App) dropSplitRoutesFast() (removed, want int) {
+	want = len(a.tunSplitRoutes)
+	for _, r := range a.tunSplitRoutes {
+		row := mibIPForwardRow{Dest: r.Dest, Mask: r.Mask, NextHop: r.NextHop, IfIndex: r.IfIndex}
+		if deleteRouteRow(&row) == nil {
+			removed++
+		}
+	}
+	a.tunSplitRoutes = nil
+	return removed, want
 }
 
 // ------------------------- 对外开关（替换 sing-box 路径） -------------------------
@@ -1030,14 +1110,18 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		// Prefer the native C/lwIP tun2socks engine used by SSTap. It consumes the
 		// installed TAP-Windows adapter directly and avoids the Go/gVisor path.
 		if err := a.startNativeTun(*node); err == nil {
-			hostRoutes, nRouted, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, nativeSSTapRouterIP, "")
+			hostRoutes, splitRoutes, nRouted, rtErr := applySstapRoutingWithGateway(*node, a.tunIfaceIdx, a.routingMode, nativeSSTapRouterIP, "")
+			a.tunHostRoutes = hostRoutes
+			a.tunSplitRoutes = splitRoutes
 			if rtErr != nil {
 				a.stopNativeTun()
 				a.removeTapRouting()
+				a.tunIfaceIdx = 0
 				return a.tunRunning, fmt.Errorf("SSTap routing setup failed: %v", rtErr)
 			}
-			a.tunHostRoutes = hostRoutes
 			a.tunRunning = true
+			// 原生 tun2socks 只给网卡配了 IPv4，没有 tunGateway6，
+			// 因此这里不写 2000::/3（写了也是无效路由）。
 			a.addLogInternal("info", fmt.Sprintf("SSTap native engine ready | %d routes | policy %s | node: %s", nRouted, a.routingMode, node.Name))
 			a.savePersisted()
 			tray.requestRebuild()
@@ -1058,13 +1142,17 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		}
 
 		// 3) 铺路由（DNS 劫持 + 节点 /32 防回环 + 按策略分流）并启动转发
-		hostRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
+		// Go 路径会给网卡设置劫持 DNS（198.18.0.2），停止时需复位
+		a.tapDnsHijacked = true
+		hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
+		a.tunHostRoutes = hostRoutes
+		a.tunSplitRoutes = splitRoutes
 		if rtErr != nil {
 			a.addLogInternal("error", fmt.Sprintf("TUN: routing setup failed: %v", rtErr))
 			a.removeTapRouting()
+			a.tunIfaceIdx = 0
 			return a.tunRunning, fmt.Errorf("SSTap routing setup failed: %v", rtErr)
 		}
-		a.tunHostRoutes = hostRoutes
 		addTunIPv6Route(ifIdx)
 		if err := a.startTapForwarding(); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("TUN: forwarding stack failed: %v", err))
@@ -1080,6 +1168,8 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		a.stopNativeTun()
 		a.stopTapForwarding()
 		a.removeTapRouting()
+		// 状态归零（网卡本身保留）：残留 ifIdx 会让后续自检/诊断误判为未清理
+		a.tunIfaceIdx = 0
 		if a.tunRunning {
 			a.tunRunning = false
 			a.addLogInternal("info", "TUN stopped, all traffic back to direct (adapter kept installed)")

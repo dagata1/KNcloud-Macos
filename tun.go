@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -48,6 +49,20 @@ const (
 	tunGateway6  = "fdfe:dcba:9876::1" // 虚拟网卡 IPv6 地址（/126），配合 2000::/3 分流路由堵 IPv6 泄漏
 )
 
+// hiddenProc 返回不带控制台窗口的进程属性。
+// netsh / powershell / pnputil 都是控制台程序：直接 exec 会先闪一个黑框再关，
+// 关 TUN 时尤其明显。HideWindow 只隐藏首次窗口，CreationFlags 才是根治项。
+func hiddenProc() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+}
+
+// runHidden 执行一个控制台程序并取回输出，全程不闪黑窗。
+func runHidden(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = hiddenProc()
+	return cmd.CombinedOutput()
+}
+
 var (
 	iphlpapi                        = windows.NewLazySystemDLL("iphlpapi.dll")
 	procGetBestRoute                = iphlpapi.NewProc("GetBestRoute")
@@ -56,6 +71,7 @@ var (
 	procDeleteIpForwardEntry        = iphlpapi.NewProc("DeleteIpForwardEntry")
 	procConvertInterfaceLuidToIndex = iphlpapi.NewProc("ConvertInterfaceLuidToIndex")
 	procGetIpInterfaceTable         = iphlpapi.NewProc("GetIpInterfaceTable")
+	procSetIpInterfaceEntry         = iphlpapi.NewProc("SetIpInterfaceEntry")
 	procFreeMibTable                = iphlpapi.NewProc("FreeMibTable")
 )
 
@@ -593,6 +609,54 @@ func mustLookupIPs(host string) []net.IP {
 	return ips
 }
 
+// nodeIPCache 缓存节点域名 -> IPv4 解析结果。
+// 开启/切换 TUN 都要解析节点地址（写防回环 /32 用），而 DNS 查询要 1~2 秒；
+// 开关 TUN 是用户手动操作，缓存几分钟能明显降低体感延迟。
+var nodeIPCache = struct {
+	sync.Mutex
+	m map[string]nodeIPCacheEntry
+}{m: map[string]nodeIPCacheEntry{}}
+
+type nodeIPCacheEntry struct {
+	ips   []net.IP
+	until time.Time
+}
+
+const nodeIPCacheTTL = 5 * time.Minute
+
+// lookupNodeIPv4sCached 带缓存的解析；解析失败不写缓存，避免缓存住空结果。
+func lookupNodeIPv4sCached(host string) []net.IP {
+	key := strings.ToLower(host)
+	now := time.Now()
+	nodeIPCache.Lock()
+	if e, ok := nodeIPCache.m[key]; ok && now.Before(e.until) && len(e.ips) > 0 {
+		ips := e.ips
+		nodeIPCache.Unlock()
+		return ips
+	}
+	nodeIPCache.Unlock()
+
+	ips := lookupNodeIPv4s(host)
+	if len(ips) == 0 {
+		return nil
+	}
+	nodeIPCache.Lock()
+	nodeIPCache.m[key] = nodeIPCacheEntry{ips: ips, until: now.Add(nodeIPCacheTTL)}
+	nodeIPCache.Unlock()
+	return ips
+}
+
+// adapterHasDns 回读校验网卡是否真的配置了指定 DNS
+// （netsh 参数写错时退出码仍为 0，只能靠回读确认）
+func adapterHasDns(ifIdx uint32, want string) bool {
+	out, err := runHidden("netsh", "interface", "ipv4", "show", "dnsservers",
+		fmt.Sprintf("name=%d", ifIdx))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), want)
+}
+
 // rangeToCIDRs 将闭区间 [start, end] 拆成 CIDR 列表
 func rangeToCIDRs(start, end uint64) []net.IPNet {
 	var out []net.IPNet
@@ -640,37 +704,74 @@ func vlog(format string, args ...interface{}) {
 
 // applySstapRouting 虚拟网卡就绪后写入整套 SSTap 式网络配置。
 // policy 决定分流路由集合（bypass-cn / global / proxy-cn / sstap:<rules 文件>）。
-// 返回写入物理网卡的节点直连路由（断开时需回收）与 TUN 上生效的分流路由条数。
-func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes []mibIPForwardRow, routed int, err error) {
+// 返回写入物理网卡的节点直连路由（断开时需回收）、写入 TUN 网卡的分流路由记账
+// （断开时按记账删除）与 TUN 上生效的分流路由条数。
+func applySstapRouting(node NodeItem, tunIdx uint32, policy string) (hostRoutes []mibIPForwardRow, splitRoutes []splitRouteEntry, routed int, err error) {
 	return applySstapRoutingWithGateway(node, tunIdx, policy, tunGateway, tunDnsAddr)
 }
 
 // applySstapRoutingWithGateway applies the same SSTap CIDR routing policy to a
 // specific TAP adapter topology. Native SSTap uses a different gateway and does
 // not expose the sing-box fake DNS listener.
-func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway, dnsAddr string) (hostRoutes []mibIPForwardRow, routed int, err error) {
+func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway, dnsAddr string) (hostRoutes []mibIPForwardRow, splitRoutes []splitRouteEntry, routed int, err error) {
 	hidden := &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-
+	tAll := time.Now()
 	// 0) DNS 劫持生效前，先用系统 DNS 解析节点服务器地址（此刻分流路由未铺，走物理出口无回环）。
 	//    系统 DNS 对被墙域名可能返回污染应答（组播/保留段），已剔除并内置公共 DNS 兜底。
-	nodeIPs := lookupNodeIPv4s(node.Address)
+	tDNS := time.Now()
+	nodeIPs := lookupNodeIPv4sCached(node.Address)
+	vlog("resolve node %s -> %v (%s)", node.Address, nodeIPs, time.Since(tDNS).Round(time.Millisecond))
 	if len(nodeIPs) == 0 {
-		return nil, 0, fmt.Errorf("failed to resolve a valid IPv4 address for node %s (system DNS may be polluted; IPv6-only nodes are not supported in TUN mode)", node.Address)
+		return nil, nil, 0, fmt.Errorf("failed to resolve a valid IPv4 address for node %s (system DNS may be polluted; IPv6-only nodes are not supported in TUN mode)", node.Address)
 	}
 
-	// 1) 网卡 metric 抢到最高 + 系统 DNS 指向劫持地址（等价 SSTap 设置 TAP 适配器 DNS/跃点数）
-	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		fmt.Sprintf("Set-NetIPInterface -InterfaceIndex %d -InterfaceMetric %d%s",
-			tunIdx, tunMetric, func() string {
-				if dnsAddr == "" {
-					return ""
-				}
-				return fmt.Sprintf("; Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses '%s'", tunIdx, dnsAddr)
-			}()))
-	ps.SysProcAttr = hidden
-	if out, err := ps.CombinedOutput(); err != nil {
-		return nil, 0, fmt.Errorf("failed to configure adapter DNS/metric: %v: %s", err, strings.TrimSpace(string(out)))
+	// 1) 网卡 metric 抢到最高（等价 SSTap 设置 TAP 适配器跃点数）。
+	//    直接调 IP Helper API：为此拉一次 PowerShell 要 4~5 秒（模块加载），
+	//    而设置 metric 只是一次系统调用。
+	tCfg := time.Now()
+	// 只读回必要字段：GetIpInterfaceEntry 的结果原样传给 SetIpInterfaceEntry 会被
+	// 拒（ERROR_INVALID_PARAMETER=87），因为 SitePrefixLength 等字段回读非零而
+	// 写入侧要求为 0。metric 是网卡的持久属性，设一次即可，重开不必再动。
+	ifaceRow := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: tunIdx}
+	if err := windows.GetIpInterfaceEntry(&ifaceRow); err != nil {
+		vlog("GetIpInterfaceEntry(ifIdx=%d) failed: %v", tunIdx, err)
+	} else if ifaceRow.Metric == tunMetric {
+		vlog("adapter metric already %d, skip", tunMetric)
+	} else {
+		// 先试 API：整行回填但把 SitePrefixLength / ZoneIndices 清零
+		// （回读非零、写入侧要求为 0，否则 ERROR_INVALID_PARAMETER）
+		set := ifaceRow
+		set.SitePrefixLength = 0
+		set.ZoneIndices = [windows.ScopeLevelCount]uint32{}
+		set.Metric = tunMetric
+		if r, _, _ := procSetIpInterfaceEntry.Call(uintptr(unsafe.Pointer(&set))); r != 0 {
+			vlog("SetIpInterfaceEntry(ifIdx=%d) winerr %d, fallback to PowerShell", tunIdx, r)
+			ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+				fmt.Sprintf("Set-NetIPInterface -InterfaceIndex %d -InterfaceMetric %d -ErrorAction Stop", tunIdx, tunMetric))
+			ps.SysProcAttr = hidden
+			if out, err := ps.CombinedOutput(); err != nil {
+				return nil, nil, 0, fmt.Errorf("failed to configure adapter metric: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+		}
 	}
+
+	// 1b) 系统 DNS 指向劫持地址（仅 Go 路径需要：它靠 198.18.0.2 把 DNS 送进协议栈；
+	//     原生 tun2socks 路径没有 DNS 劫持监听，无需改系统 DNS，也省掉一次 PowerShell）。
+	if dnsAddr != "" {
+		// netsh 的 set dnsservers 只认 name=（不认 interface=），且参数写错时退出码仍是 0，
+		// 所以必须回读校验，不能只看 err —— 否则 DNS 静默没设上。
+		out, err := runHidden("netsh", "interface", "ipv4", "set", "dnsservers",
+			fmt.Sprintf("name=%d", tunIdx), "source=static", fmt.Sprintf("address=%s", dnsAddr),
+			"validate=no")
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("failed to configure adapter DNS: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		if !adapterHasDns(tunIdx, dnsAddr) {
+			return nil, nil, 0, fmt.Errorf("adapter DNS not applied (want %s on ifIdx=%d): %s",
+				dnsAddr, tunIdx, strings.TrimSpace(string(out)))
+		}
+	}
+	vlog("adapter metric/DNS setup: %s", time.Since(tCfg).Round(time.Millisecond))
 
 	gw := net.ParseIP(gateway)
 
@@ -678,8 +779,9 @@ func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway,
 	if dnsAddr != "" {
 		_, dnsNet, _ := net.ParseCIDR(dnsAddr + "/32")
 		if err := addRoute2(tunIdx, *dnsNet, gw, 1); err != nil {
-			return nil, 0, fmt.Errorf("failed to write DNS hijack route: %w", err)
+			return nil, nil, 0, fmt.Errorf("failed to write DNS hijack route: %w", err)
 		}
+		splitRoutes = append(splitRoutes, splitRouteEntry{Dest: ipToDword(dnsNet.IP), Mask: ipToDword(net.IP(dnsNet.Mask)), NextHop: ipToDword(gw), IfIndex: tunIdx})
 	}
 
 	// 3) 节点服务器 IP 写 /32 直连路由防回环（沿系统真实最优路由，支持 on-link 网关/PPPoE）
@@ -728,28 +830,75 @@ func applySstapRoutingWithGateway(node NodeItem, tunIdx uint32, policy, gateway,
 		rows, terr := getIpForwardTable()
 		br, brok := getBestRoute(nodeIPs[0])
 		if lastAddErr != nil {
-			return hostRoutes, 0, fmt.Errorf("failed to write direct host route for %s: %v", nodeIPs[0], lastAddErr)
+			return hostRoutes, splitRoutes, 0, fmt.Errorf("failed to write direct host route for %s: %v", nodeIPs[0], lastAddErr)
 		}
-		return hostRoutes, 0, fmt.Errorf("failed to write direct host route: system route to %s not found (diag: tableRows=%d tableErr=%v getBestRoute ok=%v ifIdx=%d nextHop=%s ips=%v)",
+		return hostRoutes, splitRoutes, 0, fmt.Errorf("failed to write direct host route: system route to %s not found (diag: tableRows=%d tableErr=%v getBestRoute ok=%v ifIdx=%d nextHop=%s ips=%v)",
 			nodeIPs[0], len(rows), terr, brok, br.IfIndex, dwordToIP(br.NextHop), nodeIPs)
 	}
 
 	// 4) 按当前策略写分流路由（全部指向 TUN 网关；策略由 sstap.go 的规则引擎计算）
-	routes, polErr := sstapPolicyRoutes(policy)
-	if polErr != nil {
-		return nil, 0, polErr
+	// 内置策略走快路径：只写两条默认路由，分流交给 Xray（与内核代理路径共用同一套
+	// geoip/geosite 规则）。只有 sstap:<file> 自定义规则才在路由表层展开 CIDR。
+	var routes []net.IPNet
+	if fast, ok := sstapTunRoutesFast(policy); ok {
+		routes = fast
+	} else {
+		var polErr error
+		routes, polErr = sstapPolicyRoutes(policy)
+		if polErr != nil {
+			return nil, nil, 0, polErr
+		}
 	}
 	var firstErr error
+	tSplit := time.Now()
 	for _, r := range routes {
-		if err := addRoute2(tunIdx, r, gw, routeMetric); err != nil {
+		err := addRoute2(tunIdx, r, gw, routeMetric)
+		if err != nil && syscall.Errno(5010) != err {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
+		// 已存在（5010）视为成功并纳入记账：路由本来就在该去的位置，
+		// 且记账保证后续清理能删掉它，避免残留导致下次启动失败
+		splitRoutes = append(splitRoutes, splitRouteEntry{Dest: ipToDword(r.IP), Mask: ipToDword(net.IP(r.Mask)), NextHop: ipToDword(gw), IfIndex: tunIdx})
 		routed++
 	}
-	return hostRoutes, routed, firstErr
+	vlog("policy %s: wrote %d split routes in %s (%d CIDRs)", policy, routed, time.Since(tSplit).Round(time.Millisecond), len(routes))
+	vlog("applySstapRouting total: %s", time.Since(tAll).Round(time.Millisecond))
+	return hostRoutes, splitRoutes, routed, firstErr
+}
+
+// splitRouteEntry 记录一条写入 TUN 网卡的分流路由（仅用于记账与日志；
+// 实际清理走 removeTapRoutesBulk 一次性清空该网卡）。
+type splitRouteEntry struct {
+	Dest, Mask, NextHop uint32
+	IfIndex             uint32
+}
+
+// removeTapRoutesBulk 一次性清空虚拟网卡上的全部 IPv4 路由（分流 + DNS 劫持）。
+//
+// 为什么不用逐行 DeleteIpForwardEntry：
+//  1. 断开（media-disconnected）状态网卡的路由对旧版 GetIpForwardTable 不可见，
+//     枚举式删除会静默漏删 —— 每次开关泄漏上万条僵尸路由；
+//  2. 逐行删除上万次会把关闭/切换路径拖到几十秒（表现为窗口关不掉）。
+// PowerShell 的 Remove-NetRoute 走新版 IP Helper，断开网卡同样能删，且一条命令搞定。
+//
+// 该网卡由本程序专用（TAP 常驻），其上路由全部由本程序写入，可整体清空。
+func removeTapRoutesBulk(ifIdx uint32) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	psCmd := fmt.Sprintf(
+		"Remove-NetRoute -InterfaceIndex %d -Confirm:$false -ErrorAction SilentlyContinue; "+
+			"Remove-NetRoute -InterfaceIndex %d -DestinationPrefix '2000::/3' -Confirm:$false -ErrorAction SilentlyContinue",
+		ifIdx, ifIdx)
+	ps := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd)
+	ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	out, err := ps.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // removeHostRoutes 回收写入物理网卡的节点 /32 直连路由，返回成功删除的条数
@@ -778,14 +927,59 @@ func removeHostRoutes(routes *[]mibIPForwardRow) int {
 // 网卡 metric/DNS 一样走 PowerShell 的 New-NetRoute（ActiveStore 不持久化，重启自动消失）。
 // 只接管 2000::/3 而不是 ::/0：ULA (fc00::/7) 与链路本地 (fe80::/10) 保持系统原有行为。
 func addTunIPv6Route(ifIdx uint32) error {
-	ps := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		fmt.Sprintf("New-NetRoute -InterfaceIndex %d -DestinationPrefix '2000::/3' -NextHop '%s' -RouteMetric %d -PolicyStore ActiveStore -ErrorAction Stop | Out-Null",
-			ifIdx, tunGateway6, routeMetric))
-	ps.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-	if out, err := ps.CombinedOutput(); err != nil {
+	// 该路由的下一跳是网卡自身的 IPv6 地址；网卡没配这个地址时（原生 tun2socks
+	// 路径只配 IPv4）写进去也没有意义，跳过而不是静默写一条无效路由。
+	if !ifaceHasAddr(ifIdx, tunGateway6) {
+		return nil
+	}
+	// 用 netsh 而非 PowerShell：本函数每次开关 TUN 都会调用，PowerShell 光启动
+	// 加加载 NetIP 模块就要 4~5 秒，是「开 TUN 很慢」的主因。
+	// 注意必须写 interface=（netsh 的 ipv6 子命令不接受 if= 缩写），且 netsh
+	// 参数错误时退出码仍是 0，因此必须回读校验，不能只看 err。
+	out, err := runHidden("netsh", "interface", "ipv6", "add", "route", "2000::/3", tunGateway6,
+		fmt.Sprintf("interface=%d", ifIdx), fmt.Sprintf("metric=%d", routeMetric),
+		"store=active", "publish=no")
+	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
+	if !hasIPv6SplitRoute(ifIdx) {
+		return fmt.Errorf("netsh did not create 2000::/3 on ifIdx=%d: %s", ifIdx, strings.TrimSpace(string(out)))
+	}
 	return nil
+}
+
+// removeTunIPv6RouteFast 回收 2000::/3（netsh，约 0.2s；PowerShell 约 5s）
+func removeTunIPv6RouteFast(ifIdx uint32) {
+	_, _ = runHidden("netsh", "interface", "ipv6", "delete", "route", "2000::/3",
+		fmt.Sprintf("interface=%d", ifIdx), "store=active")
+}
+
+// hasIPv6SplitRoute 回读校验 2000::/3 是否真的落在指定网卡上
+func hasIPv6SplitRoute(ifIdx uint32) bool {
+	out, err := runHidden("netsh", "interface", "ipv6", "show", "route",
+		fmt.Sprintf("interface=%d", ifIdx))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "2000::/3")
+}
+
+// ifaceHasAddr 判断网卡上是否已配置指定 IP（用于 IPv6 路由前置检查）
+func ifaceHasAddr(ifIdx uint32, ip string) bool {
+	iface, err := net.InterfaceByIndex(int(ifIdx))
+	if err != nil {
+		return false
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.String() == ip {
+			return true
+		}
+	}
+	return false
 }
 
 // removeTunIPv6Route 回收写入虚拟网卡的 IPv6 分流路由（尽力而为；
@@ -985,12 +1179,13 @@ func (a *App) startTunLocked(isRetry bool) error {
 	a.tunIfaceIdx = ifIdx
 
 	// SSTap 方案核心步骤：metric/DNS 劫持 + 服务器防回环路由 + 按当前策略写分流路由
-	hostRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
+	hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode)
+	a.tunHostRoutes = hostRoutes
+	a.tunSplitRoutes = splitRoutes
 	if rtErr != nil {
 		a.stopTunLocked()
 		return fmt.Errorf("SSTap routing setup failed: %v", rtErr)
 	}
-	a.tunHostRoutes = hostRoutes
 
 	a.tunRunning = true
 	a.tunWarmNode = *node // 记录热待机对应的出站节点，供软停止后的快速恢复比对
@@ -1018,13 +1213,13 @@ func (a *App) warmStopTunLocked() {
 	if n := removeHostRoutes(&a.tunHostRoutes); n > 0 && wasRunning {
 		a.addLogInternal("info", fmt.Sprintf("Removed %d node host routes", n))
 	}
+	a.tunSplitRoutes = nil
 
 	// 2) 清空 TUN 网卡上的分流路由与 DNS（网卡保留，tunIfaceIdx 不复位，热恢复直接复用）
 	if idx := a.tunIfaceIdx; idx != 0 {
-		if n := deleteRoutesOnInterface(idx); n > 0 && wasRunning {
-			a.addLogInternal("info", fmt.Sprintf("Removed %d split routes", n))
+		if err := removeTapRoutesBulk(idx); err != nil && wasRunning {
+			a.addLogInternal("warn", fmt.Sprintf("Failed to clear TUN routes on ifIdx=%d: %v", idx, err))
 		}
-		removeTunIPv6Route(idx)
 		c := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 			fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", idx))
 		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
@@ -1051,13 +1246,13 @@ func (a *App) stopTunLocked() {
 	if n := removeHostRoutes(&a.tunHostRoutes); n > 0 && wasRunning {
 		a.addLogInternal("info", fmt.Sprintf("Removed %d node host routes", n))
 	}
+	a.tunSplitRoutes = nil
 
 	// 2) 在适配器还活着时清干净 TUN 网卡上的分流路由与 DNS（网卡销毁时系统也会回收，此处主动清理）
 	if idx := a.tunIfaceIdx; idx != 0 {
-		if n := deleteRoutesOnInterface(idx); n > 0 && wasRunning {
-			a.addLogInternal("info", fmt.Sprintf("Removed %d split routes", n))
+		if err := removeTapRoutesBulk(idx); err != nil && wasRunning {
+			a.addLogInternal("warn", fmt.Sprintf("Failed to clear TUN routes on ifIdx=%d: %v", idx, err))
 		}
-		removeTunIPv6Route(idx)
 		c := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 			fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", idx))
 		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
@@ -1265,11 +1460,12 @@ func (a *App) reapplyTunRoutesLocked() (bool, error) {
 	if !(a.tunWarm && a.tunCmd != nil && a.tunIfaceIdx != 0 && tunNodeMatches(a.tunWarmNode, *node)) {
 		return false, fmt.Errorf("no usable warm standby")
 	}
-	hostRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx, a.routingMode)
+	hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, a.tunIfaceIdx, a.routingMode)
+	a.tunHostRoutes = hostRoutes
+	a.tunSplitRoutes = splitRoutes
 	if rtErr != nil {
 		return false, rtErr
 	}
-	a.tunHostRoutes = hostRoutes
 	addTunIPv6Route(a.tunIfaceIdx)
 	a.tunRunning = true
 	a.addLogInternal("info", fmt.Sprintf("TUN resumed from warm standby | %d split routes | policy: %s | node: %s",

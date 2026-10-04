@@ -130,6 +130,30 @@ func complementCIDRs(cidrs []net.IPNet) []net.IPNet {
 	return out
 }
 
+// sstapTunRoutesFast 返回「全量流量进 TUN、分流交给 Xray」所需的最小路由集合：
+// 只有两条默认路由（0.0.0.0/1 + 128.0.0.0/1，合起来即 0.0.0.0/0）。
+//
+// 为什么要这样：bypass-cn 在路由表层需要写入「非中国大陆」的补集，高达 12825 条
+// CIDR。写入要 1.5 秒、删除要几十秒，而且每条都要触发一次系统路由变更通知，
+// 导致 TUN 开关极慢、关闭窗口时 UI 被锁死。而这些分流规则 Xray 里本来就有一份
+// （core.go：geoip:cn / geosite:cn → direct，其余 → proxy），路由表等于把同一套
+// 策略实现了两遍，还容易与内核策略不一致。
+//
+// 改为只送默认路由后，所有流量进入 TUN 再由 Xray 按同一套规则分流，结果等价；
+// 代价是国内流量也会多走一次用户态协议栈（CPU 略高、延迟略增）。
+//
+// 仅对内置四种策略走快路径；sstap:<file> 自定义 .rules 是任意 CIDR 集合，
+// 无法用 Xray 规则表达，仍需路由表层分流（保持原行为）。
+func sstapTunRoutesFast(policy string) ([]net.IPNet, bool) {
+	switch policy {
+	case "bypass-cn", "global", "direct", "proxy-cn":
+		_, a, _ := net.ParseCIDR("0.0.0.0/1")
+		_, b, _ := net.ParseCIDR("128.0.0.0/1")
+		return []net.IPNet{*a, *b}, true
+	}
+	return nil, false
+}
+
 // sstapPolicyRoutes 计算指定分流策略下需要指向虚拟网卡网关的 CIDR 列表。
 // 策略（与 SSTap rules 的对应关系）：
 //   bypass-cn       代理中国大陆以外流量（= Skip-all-China-IP.rules）

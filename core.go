@@ -134,10 +134,12 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	}
 
 	var rules []ruleObj
-	// proxy-cn / sstap 规则文件的分流发生在路由表层（TUN），到达 Xray 的流量
-	// 本来就是应代理的部分 —— 对 Xray 而言等同于 global。
+	// sstap:<file> 自定义 .rules 在路由表层分流，到达 Xray 的流量本就该全部走代理，
+	// 因此对它而言等同于 global。
+	// 内置四种策略不再依赖路由表分流（TUN 只送默认路由进来），由下面这套规则真正生效，
+	// 与系统代理路径共用同一份策略，不会出现两套引擎不一致。
 	effectiveMode := a.routingMode
-	if effectiveMode == "proxy-cn" || strings.HasPrefix(effectiveMode, "sstap:") {
+	if strings.HasPrefix(effectiveMode, "sstap:") {
 		effectiveMode = "global"
 	}
 	switch effectiveMode {
@@ -145,6 +147,12 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		rules = append(rules, adsBlockRule(), ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "proxy"})
 	case "direct":
 		rules = append(rules, ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "direct"})
+	case "proxy-cn":
+		// 仅代理国内：geoip:cn 走代理，其余直连
+		rules = append(rules,
+			ruleObj{Type: "field", IP: []string{"geoip:cn"}, OutboundTag: "proxy"},
+			ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "direct"},
+		)
 	default: // bypass-cn
 		rules = append(rules,
 			adsBlockRule(),

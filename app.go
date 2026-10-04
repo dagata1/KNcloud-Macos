@@ -122,16 +122,19 @@ type App struct {
 	tunJob          windows.Handle    // sing-box 所在 KILL_ON_JOB_CLOSE Job
 	tunProcDone     chan struct{}     // sing-box 进程退出信号
 	tunHostRoutes   []mibIPForwardRow // 写入物理网卡的节点 /32 直连路由（断开时回收）
+	tunSplitRoutes  []splitRouteEntry // 写入 TUN 网卡的分流路由（按添加记录删除；断开网卡上的路由对旧版 IP Helper 枚举不可见，不能靠枚举清理）
 	tunReplacedCore bool              // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
 	tunWarm         bool              // sing-box 与虚拟网卡热待机（TUN 软停止后保留，重开秒级生效）
 	tunWarmNode     NodeItem          // 热待机中 sing-box 出站使用的节点（变更后需冷启动重建）
 	tap             *tapForwarder     // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
 	nativeTunCmd    *exec.Cmd         // C/lwIP tun2socks helper, SSTap-compatible fast path
 	nativeTunDone   chan struct{}
+	tapDnsHijacked  bool              // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
 	tunSampleUp     int64
 	tunSampleDown   int64
 	account         AccountInfo
 	quitting        bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
+	cleaned         bool             // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
 	webLogin        *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
 }
 
@@ -282,7 +285,12 @@ func (a *App) startup(ctx context.Context) {
 		subID := a.account.SubID
 		a.mu.RUnlock()
 		if loggedIn && subID != "" {
-			_ = a.refreshSubscription(subID)
+			if err := a.refreshSubscription(subID); err == nil {
+				// 同步完成后通知前端刷新，避免前端停留在「无节点 / 连接失败」状态
+				if a.ctx != nil {
+					runtime.EventsEmit(a.ctx, "kncloud:refresh")
+				}
+			}
 		}
 	}()
 
@@ -721,7 +729,7 @@ func (a *App) ToggleSystemProxy(enable bool) (bool, error) {
 	return a.systemProxy, nil
 }
 
-func (a *App) SetRoutingMode(mode string) bool {
+func (a *App) SetRoutingMode(mode string) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -750,20 +758,25 @@ func (a *App) SetRoutingMode(mode string) bool {
 		if err := a.tunReapplyRoutesLocked(); err != nil {
 			a.tunSoftStopLocked()
 			a.addLogInternal("error", fmt.Sprintf("TUN re-route after policy change failed: %v", err))
+			a.savePersisted()
+			tray.requestRebuild()
+			return true, err
 		}
 		a.savePersisted()
 		tray.requestRebuild()
-		return true
+		return true, nil
 	}
 
 	if a.coreRunning {
 		if err := a.startCoreLocked(); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after routing change: %v", err))
 			a.coreRunning = false
+			a.savePersisted()
+			return false, err
 		}
 	}
 	a.savePersisted()
-	return true
+	return true, nil
 }
 
 // ------------------------- Subscriptions -------------------------
@@ -831,8 +844,23 @@ func (a *App) refreshSubscription(id string) error {
 			updated = append(updated, n)
 		}
 	}
+	// 构建旧节点特征到 ID 的映射，用于在同步时保持节点 ID 稳定
+	// （避免前端因 ID 变化误认为节点切换，触发不必要的重新连接）
+	oldNodeIDs := make(map[string]string)
+	for _, n := range a.nodes {
+		if n.SubID == id {
+			key := fmt.Sprintf("%s|%d|%s", n.Address, n.Port, n.UUID)
+			oldNodeIDs[key] = n.ID
+		}
+	}
 	for i := range nodes {
-		nodes[i].ID = fmt.Sprintf("node-%d", time.Now().UnixNano()+int64(i))
+		// 如果旧节点中有匹配的（地址+端口+UUID），复用旧 ID
+		key := fmt.Sprintf("%s|%d|%s", nodes[i].Address, nodes[i].Port, nodes[i].UUID)
+		if oldID, ok := oldNodeIDs[key]; ok {
+			nodes[i].ID = oldID
+		} else {
+			nodes[i].ID = fmt.Sprintf("node-%d", time.Now().UnixNano()+int64(i))
+		}
 		nodes[i].SubID = id
 		nodes[i].Group = subName
 		updated = append(updated, nodes[i])
@@ -1010,6 +1038,11 @@ func (a *App) beforeClose(ctx context.Context) bool {
 // cleanup 退出前清理：还原系统代理、停止内核与 TUN、保存配置。
 func (a *App) cleanup() {
 	a.mu.Lock()
+	if a.cleaned {
+		a.mu.Unlock()
+		return
+	}
+	a.cleaned = true
 	defer a.mu.Unlock()
 
 	if a.systemProxy {
@@ -1034,10 +1067,21 @@ func (a *App) quitApp() {
 	ctx := a.ctx
 	a.mu.Unlock()
 
+	// 1. 立即隐藏主窗口，给用户即时的视觉反馈与响应
+	a.hideMainWindow()
+
 	a.addLogInternal("info", "Exiting KNcloud-WIN, restoring system proxy")
 
-	// 先收掉托盘图标，再让 Wails 走正常退出流程（会触发 beforeClose -> cleanup）
-	stopTray()
+	// 2. 异步卸载托盘图标，避免阻塞主退出流程
+	go stopTray()
+
+	// 3. 兜底 watchdog 定时器：如果 Wails runtime.Quit / WebView2 阻塞超过 1.5 秒，强行退出
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		// 清理可能卡在系统代理、TUN 或内核停止流程中；watchdog 不得等待清理完成，
+		// 否则主窗口虽然关闭，进程仍可能永久残留。
+		os.Exit(0)
+	}()
 
 	if ctx != nil {
 		runtime.Quit(ctx)
