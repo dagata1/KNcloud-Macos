@@ -25,8 +25,10 @@ var (
 	procSetClipboardData = user32.NewProc("SetClipboardData")
 	kernel32             = windows.NewLazySystemDLL("kernel32.dll")
 	procGlobalAlloc      = kernel32.NewProc("GlobalAlloc")
+	procGlobalFree       = kernel32.NewProc("GlobalFree")
 	procGlobalLock       = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock     = kernel32.NewProc("GlobalUnlock")
+	procGlobalSize       = kernel32.NewProc("GlobalSize")
 )
 
 const (
@@ -65,11 +67,14 @@ func setClipboardText(text string) error {
 	}
 	p, _, _ := procGlobalLock.Call(h)
 	if p == 0 {
+		procGlobalFree.Call(h)
 		return fmt.Errorf("GlobalLock failed")
 	}
-	defer procGlobalUnlock.Call(h)
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(p)), size), unsafe.Slice((*byte)(unsafe.Pointer(&u16[0])), size))
+	procGlobalUnlock.Call(h)
 	if r, _, _ := procSetClipboardData.Call(cfUnicodeText, h); r == 0 {
+		// On failure SetClipboardData does not take ownership of h.
+		procGlobalFree.Call(h)
 		return fmt.Errorf("SetClipboardData failed")
 	}
 	return nil
@@ -90,7 +95,14 @@ func clipboardText() (string, error) {
 		return "", fmt.Errorf("GlobalLock failed")
 	}
 	defer procGlobalUnlock.Call(h)
-	u := unsafe.Slice((*uint16)(unsafe.Pointer(p)), 1<<20)
+	// Bound the view to the actual movable global-memory block.  Apart from
+	// avoiding an arbitrary 2 MiB read, this prevents scanning beyond the
+	// clipboard allocation when malformed data omits a NUL terminator.
+	size, _, _ := procGlobalSize.Call(h)
+	if size < 2 {
+		return "", nil
+	}
+	u := unsafe.Slice((*uint16)(unsafe.Pointer(p)), int(size/2))
 	n := 0
 	for n < len(u) && u[n] != 0 {
 		n++

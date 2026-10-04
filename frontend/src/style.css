@@ -1087,18 +1087,19 @@ select.win11-input option {
    浏览器据此抑制全部 CSS 动画 —— 表现为加载圆环静止、图标不转、呼吸灯不闪。
    这些动画都是功能性状态指示（转圈=进行中、呼吸=已连接、闪烁=重连中），
    关掉会让人以为程序卡死，所以在该偏好下显式恢复。
-   注意 animation-duration 设为 0.001ms 而非 none，是为了让元素的最终状态
-   立即生效，同时让动画本身继续运行（none 会彻底停掉）。 */
+
+   注意：这里只恢复「动画本身」，时长必须沿用原值。
+   若把 duration 压到 0.001ms，一圈会在一帧内转完，视觉上等于静止 ——
+   这正是「正在连接」转圈不动的原因。 */
 @media (prefers-reduced-motion: reduce) {
   /* 持续型状态指示：转圈 / 呼吸 / 闪烁 —— 必须真的动起来，
-     否则用户会以为程序卡死。 */
-  .spin,
-  .simple-power-btn.connecting::after,
-  .simple-status-text.checking,
-  .simple-power-btn.connected {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: infinite !important;
-  }
+     否则用户会以为程序卡死。时长保持原值，只强制 animation 生效。
+     注意 animation-name 必须显式写：inherit 会取父元素的值，
+     父元素没设 animation-name 时动画会直接失效。 */
+  .spin { animation: spin-anim 1s linear infinite !important; }
+  .simple-power-btn.connecting::after { animation: simple-spin 0.9s linear infinite !important; }
+  .simple-status-text.checking { animation: status-blink 1.2s ease-in-out infinite !important; }
+  .simple-power-btn.connected { animation: simple-breathe 1.6s ease-in-out infinite !important; }
 
   /* 一次性入场动画：走完即到最终状态，用极短时长即可 */
   .simple-node-menu { animation: simple-pop 0.001s ease !important; }

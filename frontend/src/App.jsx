@@ -131,8 +131,7 @@ export default function App() {
   const [nodes, setNodes] = useState([]);
   // 简易模式连接检测结果：idle=未连接, checking=检测中, ok=节点可用, fail=节点无效, none=未选择节点
   const [simpleNet, setSimpleNet] = useState('idle');
-  // 首次数据加载完成前不做节点检测，避免启动时先闪出「无节点 / 连接失败」
-  const [initialLoaded, setInitialLoaded] = useState(false);
+  
   // 简易模式自定义节点下拉是否展开
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [selectedProto, setSelectedProto] = useState('ALL');
@@ -261,8 +260,6 @@ export default function App() {
       }
     } catch (e) {
       console.error("Init data load error", e);
-    } finally {
-      setInitialLoaded(true);
     }
   };
 
@@ -452,13 +449,12 @@ export default function App() {
   const simpleActiveId = nodes.find(n => n.active)?.id;
   useEffect(() => {
     if (uiMode !== 'simple') return;
-    if (!initialLoaded) return;
     if ((status.routingMode || 'bypass-cn') === 'direct') {
       setSimpleNet('idle');
       return;
     }
     checkSimpleNode();
-  }, [uiMode, status.routingMode, simpleActiveId, initialLoaded]);
+  }, [uiMode, status.routingMode, simpleActiveId]);
 
   // TUN 模式开关（虚拟网卡接管全部流量，与内核代理互斥；后端会自动停/恢复内核与系统代理）
   // SimpleConnect 是同步完成整套启停的（数秒），先立即切换开关并显示进行中文案，完成后落到真实状态
@@ -825,7 +821,6 @@ export default function App() {
           <button
             className={[
               'simple-power-btn',
-              !initialLoaded ? 'connecting' : '',
               simpleOn && simpleNet === 'ok' ? 'connected' : '',
               simpleOn && simpleNet === 'checking' ? 'connecting' : '',
               simpleOn && simpleNet === 'fail' ? 'failed' : '',
@@ -833,7 +828,7 @@ export default function App() {
             onClick={handleSimpleConnect}
             title={simpleOn ? '点击切换到全局直连' : '点击开启分流代理（绕过大陆）'}
           >
-            {!initialLoaded || (simpleOn && simpleNet === 'checking')
+            {simpleOn && simpleNet === 'checking'
               ? <LoaderCircle size={56} className="spin" />
               : <Power size={56} />}
           </button>
@@ -842,17 +837,15 @@ export default function App() {
             className={`simple-status-text ${simpleOn && simpleNet === 'checking' ? 'checking' : ''}`}
             style={simpleNet === 'fail' ? { color: '#ff6b6b' } : (simpleOn && simpleNet === 'ok' ? { color: '#3fbf6f' } : null)}
           >
-            {!initialLoaded
-              ? '正在加载…'
-              : !simpleOn
-                ? '开始连接'
-                : simpleNet === 'checking'
-                  ? '正在连接…'
-                  : simpleNet === 'fail'
-                    ? '连接失败，请更换节点'
-                    : simpleNet === 'none'
-                      ? '未选择节点'
-                      : '链接成功'}
+            {!simpleOn
+              ? '开始连接'
+              : simpleNet === 'checking'
+                ? '正在连接…'
+                : simpleNet === 'fail'
+                  ? '连接失败，请更换节点'
+                  : simpleNet === 'none'
+                    ? '未选择节点'
+                    : '链接成功'}
           </div>
 
           <div className="simple-speed">
