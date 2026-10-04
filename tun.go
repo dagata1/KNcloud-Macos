@@ -653,8 +653,14 @@ func clearTapAdapterDNS(ifIdx uint32) bool {
 	out, err := runHidden("netsh", "interface", "ipv4", "delete", "dnsservers",
 		fmt.Sprintf("name=%d", ifIdx), "address=all")
 	if err != nil {
-		vlog("clear adapter DNS (ifIdx=%d): %v: %s", ifIdx, err, strings.TrimSpace(string(out)))
-		return false
+		vlog("clear adapter IPv4 DNS (ifIdx=%d): %v: %s", ifIdx, err, strings.TrimSpace(string(out)))
+	}
+	// IPv6 也要清：设置过 IPv4 DNS 后，网卡上常会多出 fec0:: 系列占位 DNS，
+	// 它会继续被系统选中去查 DNS，导致清完 IPv4 仍然解析失败。
+	out6, err6 := runHidden("netsh", "interface", "ipv6", "delete", "dnsservers",
+		fmt.Sprintf("interface=%d", ifIdx), "address=all")
+	if err6 != nil {
+		vlog("clear adapter IPv6 DNS (ifIdx=%d): %v: %s", ifIdx, err6, strings.TrimSpace(string(out6)))
 	}
 	return !adapterHasDns(ifIdx, tunDnsAddr)
 }

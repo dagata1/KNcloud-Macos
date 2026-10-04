@@ -177,7 +177,7 @@ func (t *trayController) buildMenu() {
 	miMode := systray.AddMenuItem("模式选择", "选择代理方式：内核代理或 TUN 虚拟网卡")
 	childProxy := miMode.AddSubMenuItemCheckbox("代理模式", "内核代理 + 系统代理（127.0.0.1 本地端口）", !tunRunning)
 	childProxy.Click(func() { go a.traySetMode("proxy") })
-	childTun := miMode.AddSubMenuItemCheckbox("TUN 模式", "虚拟网卡接管全部流量：大陆直连、海外走代理，含 IPv6 防泄漏（需管理员权限）", tunRunning)
+	childTun := miMode.AddSubMenuItemCheckbox("TUN 模式", "虚拟网卡接管全部流量，实际直连/代理由「路由模式」决定（需管理员权限）", tunRunning)
 	childTun.Click(func() { go a.traySetMode("tun") })
 
 	// ---------- 分流模式 ----------

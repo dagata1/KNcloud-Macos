@@ -85,6 +85,21 @@ export default function App() {
     try { await WindowUnmaximise(); } catch (e) { /* 未最大化时忽略 */ }
     WindowSetSize(s.w, s.h);
   };
+  // 分流策略的中文说明。TUN 现在把全部流量交给虚拟网卡，实际走直连还是代理由
+  // 内核规则决定，所以界面描述必须跟随当前策略，不能再写死「大陆直连」。
+  const routingLabel = mode => {
+    switch (mode) {
+      case 'global': return '全部走代理';
+      case 'direct': return '全部直连';
+      case 'proxy-cn': return '仅代理国内';
+      case 'bypass-cn':
+      case undefined:
+      case null:
+      case '': return '大陆直连、海外代理';
+      default: return mode.startsWith('sstap:') ? '自定义规则' : '大陆直连、海外代理';
+    }
+  };
+
   // 节点延迟的展示文字与配色（简易模式节点下拉用）
   const delayText = d => d > 0 ? `${d}ms` : d === -2 ? '超时' : '未测';
   const delayColor = d => d > 0
@@ -1081,17 +1096,26 @@ export default function App() {
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                     {status.activeNodeName === '未选择节点'
                       ? '请在服务器节点列表中选择一个节点'
-                      : `${status.activeNodeProto}${status.tunnelMode ? ' · TUN 分流（大陆直连）' : ''}`}
+                      : `${status.activeNodeProto}${status.tunnelMode ? ` · TUN 分流（${routingLabel(status.routingMode)}）` : ''}`}
                   </p>
                 </div>
 
                 {/* Routing policy radio + TUN mode switch */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>分流策略</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      分流策略
+                      {status.tunnelMode && (
+                        <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: '6px' }}>
+                          （TUN 模式下不可改）
+                        </span>
+                      )}
+                    </span>
                     <div
                       className="segmented-control"
-                      style={tunBusy || !!tunPending ? { opacity: 0.45, pointerEvents: 'none' } : null}
+                      style={tunBusy || !!tunPending || status.tunnelMode
+                        ? { opacity: 0.45, pointerEvents: 'none' }
+                        : null}
                     >
                       <button
                         className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
@@ -1132,7 +1156,7 @@ export default function App() {
                           : tunPending === 'off'
                             ? '正在关闭 TUN…'
                             : status.tunnelMode
-                              ? '虚拟网卡接管全部流量 · 大陆直连'
+                              ? `虚拟网卡接管全部流量 · ${routingLabel(status.routingMode)}`
                               : '虚拟网卡接管全部流量（需管理员）'}
                       </span>
                       <label className="win11-toggle" style={{ flexShrink: 0 }} title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">

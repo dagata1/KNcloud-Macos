@@ -753,18 +753,13 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 	}
 	a.addLogInternal("info", fmt.Sprintf("Routing mode changed to: %s", modeLabel))
 
-	// TUN 运行中：常驻网卡不动，按新策略重铺分流路由（秒级生效）
+	// TUN 运行中不允许改分流策略：TUN 只是「把流量送进虚拟网卡」这一层，
+	// 策略仍由内核 geoip/geosite 规则执行，两者是不同维度。在���直接拒绝，
+	// 避免出现「策略已改但路由重铺到一半」的中间状态。
 	if a.tunRunning {
-		if err := a.tunReapplyRoutesLocked(); err != nil {
-			a.tunSoftStopLocked()
-			a.addLogInternal("error", fmt.Sprintf("TUN re-route after policy change failed: %v", err))
-			a.savePersisted()
-			tray.requestRebuild()
-			return true, err
-		}
+		a.addLogInternal("warn", "Routing policy change rejected while TUN is active; turn TUN off first")
 		a.savePersisted()
-		tray.requestRebuild()
-		return true, nil
+		return false, fmt.Errorf("分流策略在 TUN 模式下不可修改，请先关闭 TUN")
 	}
 
 	if a.coreRunning {
