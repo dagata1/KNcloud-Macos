@@ -7,7 +7,7 @@ import "testing"
 func TestClipboardRoundTrip(t *testing.T) {
 	orig, _ := clipboardText()
 
-	const want = "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpmNGMwZTliZS1hYWM2LTRlNTItODE1Ni02YzdhMTg4MmJiZGY@jp.kncloud.top:456?#日本[V6]"
+	const want = "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTp0ZXN0LXBhc3M@ss.example.test:456?#测试节点"
 	if err := setClipboardText(want); err != nil {
 		t.Skipf("clipboard unavailable in test environment: %v", err)
 	}

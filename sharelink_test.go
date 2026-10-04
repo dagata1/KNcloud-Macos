@@ -8,22 +8,22 @@ import (
 	"testing"
 )
 
-// TestShareLinkRoundTrip 用用户提供的真实 ss 链接验证 SIP002 解析，
+// TestShareLinkRoundTrip 用测试示例 ss 链接验证 SIP002 解析，
 // 并对全部协议做「解析 → 生成 → 再解析」往返一致性检查。
 func TestShareLinkRoundTrip(t *testing.T) {
-	const realSS = `ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpmNGMwZTliZS1hYWM2LTRlNTItODE1Ni02YzdhMTg4MmJiZGY@jp.kncloud.top:456?#%E6%97%A5%E6%9C%AC%5BV6%5D`
+	const realSS = `ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTp0ZXN0LXBhc3M@ss.example.test:456?#%E6%B5%8B%E8%AF%95%E8%8A%82%E7%82%B9`
 	n, err := ParseShareLink(realSS)
 	if err != nil {
-		t.Fatalf("real ss link parse: %v", err)
+		t.Fatalf("sample ss link parse: %v", err)
 	}
-	if n.Protocol != "Shadowsocks" || n.Address != "jp.kncloud.top" || n.Port != 456 ||
-		n.Method != "chacha20-ietf-poly1305" || n.UUID != "f4c0e9be-aac6-4e52-8156-6c7a1882bbdf" || n.Name != "日本[V6]" {
-		t.Fatalf("real ss parse wrong: %+v", n)
+	if n.Protocol != "Shadowsocks" || n.Address != "ss.example.test" || n.Port != 456 ||
+		n.Method != "chacha20-ietf-poly1305" || n.UUID != "test-pass" || n.Name != "测试节点" {
+		t.Fatalf("sample ss parse wrong: %+v", n)
 	}
 
 	samples := []NodeItem{
-		{Protocol: "Shadowsocks", Name: "日本[V6]", Address: "jp.kncloud.top", Port: 456,
-			Method: "chacha20-ietf-poly1305", UUID: "f4c0e9be-aac6-4e52-8156-6c7a1882bbdf", Security: "none"},
+		{Protocol: "Shadowsocks", Name: "测试节点", Address: "ss.example.test", Port: 456,
+			Method: "chacha20-ietf-poly1305", UUID: "test-pass", Security: "none"},
 		{Protocol: "VLESS", Name: "香港01", Address: "hk.example.com", Port: 443, UUID: "u1",
 			Security: "reality", Network: "grpc", SNI: "www.apple.com", FP: "chrome",
 			PBK: "pbk-x", SID: "6ba85179", ServiceName: "grpc-stream"},
