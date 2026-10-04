@@ -27,3 +27,13 @@ wails build        # 产物位于 build/bin/KNcloud-WIN.exe
 - Hysteria2 节点可导入展示，但 Xray 内核不支持其代理转发，启动该类节点会给出明确错误
 - 默认端口 SOCKS5 `10808` / HTTP `10809`，与其他代理软件冲突时请在「首选项设置」中修改
 - 首选项中开启「自动启动内核」后，应用启动即自动恢复上次的节点与系统代理状态
+## Windows 发布签名
+
+Windows SmartScreen 可能会对未签名或信誉不足的新程序显示“发布者未知”警告。正式版本由 GitHub Actions 使用 Windows Authenticode 代码签名证书签名；发布标签构建在签名配置缺失时会直接失败，避免发布未签名的 EXE。
+
+在仓库的 **Settings → Secrets and variables → Actions** 中配置：
+
+- `WINDOWS_CERTIFICATE_BASE64`：`.pfx` 证书文件的 Base64 内容
+- `WINDOWS_CERTIFICATE_PASSWORD`：`.pfx` 密码
+
+证书私钥不会提交到仓库。签名可以显示可信发布者，但 SmartScreen 信誉仍可能需要一段时间建立。
