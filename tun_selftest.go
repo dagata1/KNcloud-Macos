@@ -10,7 +10,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -135,20 +137,57 @@ func runTunSelfTest(a *App) int {
 		}
 	}
 
-	// 4) 内核分流抽查：TUN 现在把全部流量送进虚拟网卡（只有两条默认路由），
-	// 国内直连/海外代理由 Xray 的 geoip/geosite 规则判定，不再由路由表逐条绕过。
-	// 因此这里改为验证「国内地址确实经 TUN 进入内核且被内核判为 direct」。
-	dnsOK := false
-	if ips, err := net.LookupIP("www.baidu.com"); err == nil && len(ips) > 0 {
-		if cnr, cnOK := getBestRoute(ips[0].To4()); cnOK {
-			fmt.Printf("[ OK ] CN IP %s goes via TUN ifIdx=%d, Xray rules send it direct\n",
-				ips[0], cnr.IfIndex)
-			dnsOK = true
+	// 4) TUN 模式分流语义校验。
+	//    TUN 开启后策略固定为「除局域网外全部走代理」，所以要验两件事：
+	//      a) 国内站点也必须从代理节点出站 —— 用国内 IP 查询服务反查出口 IP；
+	//      b) 局域网必须直连 —— 物理网关仍可直达。
+	//    旧版这里只查路由表就打印「Xray rules send it direct」，从不观察实际出站，
+	//    属于恒真的假断言；这里改为校验真实出口 IP。
+	cnSet := parseCIDRList(cnRoutesTxt)
+	inCN := func(ip net.IP) bool {
+		for _, n := range cnSet {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 节点自身 IP：出口 IP 等于它即可确凿证明走了代理
+	var nodeIP net.IP
+	a.mu.RLock()
+	for i := range a.nodes {
+		if a.nodes[i].Active {
+			if ips := lookupNodeIPv4sCached(a.nodes[i].Address); len(ips) > 0 {
+				nodeIP = ips[0]
+			}
+			break
 		}
 	}
-	if !dnsOK {
-		fmt.Println("[FAIL] cannot verify CN traffic entering TUN (dns or route lookup failed)")
-		fail++
+	a.mu.RUnlock()
+
+	if exitIP := fetchExitIP(); exitIP != nil {
+		switch {
+		case nodeIP != nil && exitIP.Equal(nodeIP):
+			fmt.Printf("[ OK ] CN site exits via proxy node (exit IP %s == node IP)\n", exitIP)
+		case inCN(exitIP):
+			fmt.Printf("[FAIL] TUN policy must proxy CN traffic, but exit IP %s is still inside CN ranges (went direct)\n", exitIP)
+			fail++
+		default:
+			fmt.Printf("[ OK ] CN site exits via proxy node (exit IP %s outside CN ranges)\n", exitIP)
+		}
+	} else {
+		fmt.Println("[warn] exit IP lookup failed; skipped CN-proxy assertion")
+	}
+
+	// 局域网直连：物理网卡仍在，私网地址不经代理
+	if gw := physicalGateway(a); gw != nil {
+		if c, err := net.DialTimeout("tcp", gw.String(), 3*time.Second); err == nil {
+			c.Close()
+			fmt.Printf("[ OK ] LAN gateway %s reachable directly (bypasses proxy)\n", gw)
+		} else {
+			fmt.Printf("[warn] LAN gateway %s not reachable: %v\n", gw, err)
+		}
 	}
 
 	// 5) 断开 + 清理校验
@@ -199,6 +238,58 @@ func runTunSelfTest(a *App) int {
 		return 1
 	}
 	return 0
+}
+
+// fetchExitIP 反查当前出口 IP。用国内托管的查询服务，这样返回的地址落在
+// 中国网段就说明流量是直连出去的（没被代理），落在境外则说明走了代理节点。
+func fetchExitIP() net.IP {
+	client := &http.Client{Timeout: 8 * time.Second}
+	for _, u := range []string{"https://ip.3322.net", "https://myip.ipip.net"} {
+		resp, err := client.Get(u)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil {
+			return ip
+		}
+	}
+	return nil
+}
+
+// physicalGateway 找出物理网卡的默认网关（TUN 网卡上的默认路由要排除）。
+// 用于验证「局域网直连」这条规则确实生效。
+func physicalGateway(a *App) *net.TCPAddr {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	tunIdx := a.tunIfaceIdx
+	a.mu.RUnlock()
+
+	rows, err := getIpForwardTable()
+	if err != nil {
+		return nil
+	}
+	var best *net.TCPAddr
+	var bestMetric uint32
+	for _, r := range rows {
+		if r.Mask != 0 || r.Dest != 0 || r.NextHop == 0 {
+			continue // 只看 0.0.0.0/0
+		}
+		if tunIdx != 0 && r.IfIndex == tunIdx {
+			continue // 跳过 TUN 网卡自己写入的默认路由
+		}
+		if best == nil || r.Metric1 < bestMetric {
+			bestMetric = r.Metric1
+			best = &net.TCPAddr{IP: dwordToIP(r.NextHop), Port: 80}
+		}
+	}
+	return best
 }
 
 // dumpRouteTable 打印系统默认路由（旧 API 读取，验证字段语义正确）

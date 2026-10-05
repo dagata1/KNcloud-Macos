@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,8 +95,14 @@ type ruleObj struct {
 func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	switch node.Protocol {
 	case "VLESS", "VMess", "Trojan", "Shadowsocks":
+	case "AnyTLS":
+		// Xray 没有 AnyTLS 出站，走 sing-box 协议桥（见 anytls.go）：
+		// 本配置里的 proxy 出站指向桥的本地 SOCKS 端口
+		if a.bridgeAddr == "" {
+			return "", fmt.Errorf("AnyTLS bridge is not running")
+		}
 	default:
-		return "", fmt.Errorf("Xray core does not support %s (supported: VLESS/VMess/Trojan/Shadowsocks)", node.Protocol)
+		return "", fmt.Errorf("Xray core does not support %s (supported: VLESS/VMess/Trojan/Shadowsocks/AnyTLS)", node.Protocol)
 	}
 
 	listen := "127.0.0.1"
@@ -122,7 +129,7 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		},
 	}
 
-	proxyOut, err := buildProxyOutbound(node, a.settings.MuxEnabled)
+	proxyOut, err := buildProxyOutbound(node, a.settings.MuxEnabled, a.bridgeAddr)
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +151,13 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	}
 	switch effectiveMode {
 	case "global":
-		rules = append(rules, adsBlockRule(), ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "proxy"})
+		// 局域网必须直连：否则路由器 / 打印机 / NAS / 本地开发服务器全部不可达。
+		// 这条同时也是 TUN 模式的分流规则（TUN 开启时策略固定为 global）。
+		rules = append(rules,
+			adsBlockRule(),
+			ruleObj{Type: "field", IP: []string{"geoip:private"}, OutboundTag: "direct"},
+			ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "proxy"},
+		)
 	case "direct":
 		rules = append(rules, ruleObj{Type: "field", Network: "tcp,udp", OutboundTag: "direct"})
 	case "proxy-cn":
@@ -171,6 +184,11 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	}
 	if len(dnsServers) == 0 {
 		dnsServers = []string{"1.1.1.1", "8.8.8.8"}
+	}
+	// 全局直连时必须换用国内 DNS：配置的 1.1.1.1 / 8.8.8.8 从国内直连会被污染
+	// 或直接不可达，解析结果指向境外站点，于是「直连」仍表现为代理 IP。
+	if effectiveMode == "direct" {
+		dnsServers = []string{"223.5.5.5", "119.29.29.29"}
 	}
 
 	cfg := map[string]interface{}{
@@ -202,7 +220,34 @@ func adsBlockRule() ruleObj {
 	return ruleObj{Type: "field", Domain: []string{"geosite:category-ads-all"}, OutboundTag: "block"}
 }
 
-func buildProxyOutbound(node NodeItem, muxEnabled bool) (map[string]interface{}, error) {
+// buildProxyOutbound 生成 Xray 的 proxy 出站。
+// bridgeAddr 仅 AnyTLS 用得上：Xray 不认识 AnyTLS，只能把流量交给 sing-box 协议桥，
+// 此时 proxy 出站退化成指向本机桥端口的 socks 出站（空串表示桥没起）。
+func buildProxyOutbound(node NodeItem, muxEnabled bool, bridgeAddr string) (map[string]interface{}, error) {
+	if needsSingBoxBridge(node.Protocol) {
+		if bridgeAddr == "" {
+			return nil, fmt.Errorf("AnyTLS bridge is not running")
+		}
+		host, portStr, err := net.SplitHostPort(bridgeAddr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AnyTLS bridge address: %w", err)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AnyTLS bridge port: %w", err)
+		}
+		// udp: true 是必须的：桥的 mixed 入站支持 UDP，
+		// 缺了它 Xray 的 UDP 流量（QUIC、游戏、STUN）会在桥这一层断掉
+		return map[string]interface{}{
+			"tag":      "proxy",
+			"protocol": "socks",
+			"settings": map[string]interface{}{
+				"servers": []map[string]interface{}{{"address": host, "port": port}},
+				"udp":     true,
+			},
+		}, nil
+	}
+
 	stream := map[string]interface{}{"network": node.Network}
 	switch node.Security {
 	case "tls":
@@ -330,25 +375,41 @@ func (a *App) startCoreLocked() error {
 		ln.Close()
 	}
 
+	// Xray 不支持 AnyTLS：这类节点先起 sing-box 协议桥，
+	// 再把它的本地 SOCKS 端口当作 Xray 的 proxy 出站
+	if needsSingBoxBridge(node.Protocol) {
+		bridge, err := startAnyTLSBridge(*node)
+		if err != nil {
+			return fmt.Errorf("failed to start AnyTLS bridge: %w", err)
+		}
+		a.bridge = bridge
+		a.bridgeAddr = bridge.addr
+	}
+
 	cfgJSON, err := a.buildCoreConfigJSON(*node)
 	if err != nil {
+		a.stopBridgeLocked()
 		return err
 	}
 
 	pbCfg, err := serial.DecodeJSONConfig(bytes.NewReader([]byte(cfgJSON)))
 	if err != nil {
+		a.stopBridgeLocked()
 		return fmt.Errorf("failed to parse core config: %w", err)
 	}
 	coreCfg, err := pbCfg.Build()
 	if err != nil {
+		a.stopBridgeLocked()
 		return fmt.Errorf("failed to build core config: %w", err)
 	}
 	inst, err := xcore.New(coreCfg)
 	if err != nil {
+		a.stopBridgeLocked()
 		return fmt.Errorf("failed to create core instance: %w", err)
 	}
 	if err := inst.Start(); err != nil {
 		inst.Close()
+		a.stopBridgeLocked()
 		return fmt.Errorf("failed to start core: %w", err)
 	}
 	a.xrayInst = inst
@@ -363,6 +424,16 @@ func (a *App) stopCoreLocked() {
 		a.xrayInst.Close()
 		a.xrayInst = nil
 	}
+	a.stopBridgeLocked()
+}
+
+// stopBridgeLocked 停掉 AnyTLS 协议桥（调用方需持有写锁；无桥时为空操作）。
+func (a *App) stopBridgeLocked() {
+	if a.bridge != nil {
+		a.bridge.Stop()
+		a.bridge = nil
+	}
+	a.bridgeAddr = ""
 }
 
 // coreTrafficSample 读取内核流量计数器（字节），用于实时速率显示
@@ -397,7 +468,19 @@ func testNodeRealDelay(node NodeItem) int {
 	// 与 v2rayN 默认的真连接延迟测速地址一致，保证数值可比
 	const testURL = "https://www.google.com/generate_204"
 
-	proxyOut, err := buildProxyOutbound(node, false)
+	// AnyTLS 走 sing-box 协议桥：临时起一个桥，Xray 出站指向它。
+	// 每次测速独立起停，桥不与常驻内核共享（并发测速时各占各的端口）。
+	bridgeAddr := ""
+	if needsSingBoxBridge(node.Protocol) {
+		bridge, err := startAnyTLSBridge(node)
+		if err != nil {
+			return -2
+		}
+		defer bridge.Stop()
+		bridgeAddr = bridge.addr
+	}
+
+	proxyOut, err := buildProxyOutbound(node, false, bridgeAddr)
 	if err != nil {
 		return -2
 	}

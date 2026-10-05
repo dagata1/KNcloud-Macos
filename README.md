@@ -4,8 +4,8 @@
 
 ## 功能
 
-- **真实代理内核**：内置 Xray-core（嵌入编译，无需外部内核文件），支持 VLESS / VMess / Trojan / Shadowsocks 节点，本地提供 SOCKS5 与 HTTP 代理入站
-- **订阅管理**：真实拉取订阅链接（自动识别 Base64 / 明文分享链接列表），解析 vmess:// vless:// trojan:// ss:// hysteria2:// 链接，自动过滤机场"流量信息/套餐到期"伪节点；支持订阅更新与删除
+- **真实代理内核**：内置 Xray-core（嵌入编译，无需外部内核文件），支持 VLESS / VMess / Trojan / Shadowsocks / AnyTLS 节点，本地提供 SOCKS5 与 HTTP 代理入站
+- **订阅管理**：真实拉取订阅链接（自动识别 Base64 / 明文分享链接列表），解析 vmess:// vless:// trojan:// ss:// hysteria2:// anytls:// 链接，自动过滤机场"流量信息/套餐到期"伪节点；支持订阅更新与删除
 - **分享链接导入**：服务器页「导入分享链接」弹窗，支持每行一条批量导入或直接粘贴 Base64 订阅内容
 - **节点测速**：真实 TCP 拨测延迟（单节点 / 全部）
 - **路由分流**：绕过大陆（geoip:cn / geosite:cn 直连，内置 geoip.dat / geosite.dat，首次运行自动释放到配置目录）、全局代理、全局直连；内置广告拦截规则（geosite:category-ads-all → 阻断）
@@ -25,6 +25,7 @@ wails build        # 产物位于 build/bin/KNcloud-WIN.exe
 ## 说明
 
 - Hysteria2 节点可导入展示，但 Xray 内核不支持其代理转发，启动该类节点会给出明确错误
+- AnyTLS 走内置 sing-box 协议桥：Xray 没有 AnyTLS 出站，程序会让 sing-box 起一个仅监听 127.0.0.1 的 SOCKS 端口负责 AnyTLS 链路，Xray 仍做分流与统计（详见 `anytls.go`）
 - 默认端口 SOCKS5 `10808` / HTTP `10809`，与其他代理软件冲突时请在「首选项设置」中修改
 - 首选项中开启「自动启动内核」后，应用启动即自动恢复上次的节点与系统代理状态
 ## Windows 发布签名

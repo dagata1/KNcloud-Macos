@@ -27,6 +27,8 @@ func ParseShareLink(link string) (NodeItem, error) {
 		return parseShadowsocksLink(link)
 	case strings.HasPrefix(lower, "hysteria2://"), strings.HasPrefix(lower, "hy2://"):
 		return parseUserHostLink(link, "Hysteria2")
+	case strings.HasPrefix(lower, "anytls://"):
+		return parseUserHostLink(link, "AnyTLS")
 	default:
 		return NodeItem{}, fmt.Errorf("unrecognized protocol")
 	}
@@ -115,6 +117,16 @@ func parseUserHostLink(link, proto string) (NodeItem, error) {
 		security = "tls"
 		network = "udp"
 	}
+	// AnyTLS 本身就是 TLS over TCP，缺省补齐；type 只保留 tcp，
+	// 别的协议字段（path/host/serviceName 等）对它没有意义
+	if proto == "AnyTLS" {
+		if security == "" || security == "none" {
+			security = "tls"
+		}
+		if network != "tcp" {
+			network = "tcp"
+		}
+	}
 	methodPass := ""
 	if proto == "Shadowsocks" {
 		methodPass = u.User.Username()
@@ -136,8 +148,18 @@ func parseUserHostLink(link, proto string) (NodeItem, error) {
 		Path:        q.Get("path"),
 		HostName:    q.Get("host"),
 		ServiceName: q.Get("serviceName"),
+		Insecure:    parseBoolParam(firstNonEmpty(q.Get("insecure"), q.Get("allowInsecure"))),
 		Delay:       -1,
 	}, nil
+}
+
+// parseBoolParam 分享链接里的布尔参数：1/true/yes/on 都算真，空值算假。
+func parseBoolParam(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func parseShadowsocksLink(link string) (NodeItem, error) {
@@ -271,10 +293,14 @@ func BuildShareLink(n NodeItem) (string, error) {
 			return "", err
 		}
 		return "vmess://" + base64.RawURLEncoding.EncodeToString(data), nil
-	case "VLESS", "Trojan", "Hysteria2":
+	case "VLESS", "Trojan", "Hysteria2", "AnyTLS":
 		q := url.Values{}
 		if n.Security != "" && n.Security != "none" {
 			q.Set("security", n.Security)
+		}
+		if n.Insecure {
+			q.Set("insecure", "1")
+			q.Set("allowInsecure", "1")
 		}
 		if n.Network != "" && n.Network != "tcp" {
 			q.Set("type", n.Network)

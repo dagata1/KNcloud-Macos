@@ -164,7 +164,7 @@ func wintutCreatePersistentAdapter(name string) (adapter uintptr, err error) {
 		uintptr(unsafe.Pointer(&knTapGUID)),
 	)
 	if r1 == 0 {
-		return 0, fmt.Errorf("WintunCreateAdapter failed: lasterr=%d", windows.GetLastError())
+		return 0, fmt.Errorf("WintunCreateAdapter failed: winerr %d (%v)", windows.GetLastError(), windows.GetLastError())
 	}
 	return r1, nil
 }
@@ -178,13 +178,13 @@ func wintunOpenAdapterByName(name string) (uintptr, error) {
 	if r1 != 0 {
 		return r1, nil
 	}
-	return 0, fmt.Errorf("WintunOpenAdapter failed: lasterr=%d", windows.GetLastError())
+	return 0, fmt.Errorf("WintunOpenAdapter failed: winerr %d (%v)", windows.GetLastError(), windows.GetLastError())
 }
 
 func wintunStartSession(adapter uintptr, capacity uint32) (session uintptr, err error) {
 	r1, _, _ := wintunProcStartSession.Call(adapter, uintptr(capacity))
 	if r1 == 0 {
-		return 0, fmt.Errorf("WintunStartSession failed: winerr %d", windows.GetLastError())
+		return 0, fmt.Errorf("WintunStartSession failed: winerr %d (%v)", windows.GetLastError(), windows.GetLastError())
 	}
 	return r1, nil
 }
@@ -806,6 +806,75 @@ func (a *App) tunReapplyRoutesLocked() error {
 	return nil
 }
 
+// tunHardSwitchLocked TUN 运行中换节点的**完整**切换流程。
+//
+// 为什么不能只重铺路由（tunReapplyRoutesLocked）：存量连接不会因为路由变化而
+// 迁移。协议栈里已建立的 TCP 流、浏览器与检测站之间的 keep-alive 连接，仍旧挂在
+// 旧节点建立的 SOCKS5 连接上继续跑 —— 于是界面显示「已切到新加坡」，而刷新检测站
+// 拿到的仍是旧节点（韩国）的出口 IP。只有把整个转发运行时拆掉重建，这些连接才会
+// 被强制断开，重建后的新连接才会走新节点。
+//
+// 顺序很重要：先停转发（断开存量连接）→ 再重启内核（SOCKS5 监听器带上新节点）
+// → 最后重铺路由并拉起转发。反过来会让新连接撞上还没换好的监听器。
+func (a *App) tunHardSwitchLocked(node NodeItem) error {
+	idx := a.tunIfaceIdx
+	if idx == 0 {
+		return fmt.Errorf("TUN is not running")
+	}
+	wasNative := a.nativeTunRunning()
+	gw, dnsAddr := tunGateway, tunDnsAddr
+	if wasNative {
+		gw, dnsAddr = nativeSSTapRouterIP, ""
+	}
+
+	// 1) 停转发。stopTapForwarding 内部会 Destroy 协议栈，令所有 gvisor 端点
+	//    立即报错退出，其上的 SOCKS5 连接随之关闭；原生路径则终止子进程。
+	a.stopNativeTun()
+	a.stopTapForwarding()
+
+	// 2) 内核带上新节点重启。新 SOCKS5 监听器就绪后下面的新连接才有意义。
+	if a.coreRunning {
+		if err := a.startCoreLocked(); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Node switch: restart core failed: %v", err))
+			a.coreRunning = false
+			return fmt.Errorf("restart core: %w", err)
+		}
+	}
+
+	// 3) 清 DNS 缓存：否则检测站/CDN 可能继续命中旧解析结果。
+	flushDnsClientCache()
+
+	// 4) 重铺路由。节点的 /32 防回环记录换了新服务器 IP，必须重写，
+	//    否则新节点的流量会被送进 TUN 形成回环。
+	a.tunIfaceIdx = idx
+	a.removeTapRouting()
+	hostRoutes, splitRoutes, _, rtErr := applySstapRoutingWithGateway(node, idx, a.routingMode, gw, dnsAddr, a.settings.DnsServers)
+	if rtErr != nil {
+		a.tunIfaceIdx = 0
+		return rtErr
+	}
+	a.tunHostRoutes = hostRoutes
+	a.tunSplitRoutes = splitRoutes
+	_ = addTunIPv6Route(idx)
+
+	// 5) 按原引擎拉起转发，新连接从此走新节点。
+	if wasNative {
+		if err := a.startNativeTun(node); err != nil {
+			a.removeTapRouting()
+			a.tunIfaceIdx = 0
+			return fmt.Errorf("restart native TUN: %w", err)
+		}
+	} else if err := a.startTapForwarding(); err != nil {
+		a.removeTapRouting()
+		a.tunIfaceIdx = 0
+		return fmt.Errorf("restart TUN forwarding: %w", err)
+	}
+
+	a.addLogInternal("info", fmt.Sprintf("Node switched with full tunnel reset | connections dropped | DNS cache flushed | node: %s (%s:%d)",
+		node.Name, node.Address, node.Port))
+	return nil
+}
+
 // tunSoftStopLocked TUN 软停止（tapstack 版）：停转发 + 撤路由，常驻网卡保留
 func (a *App) tunSoftStopLocked() {
 	a.stopNativeTun()
@@ -1092,8 +1161,21 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			return a.tunRunning, fmt.Errorf("no node selected")
 		}
 
-		// 1) Xray 内核（代理大脑）必须在线；未运行则静默拉起
-		if !a.coreRunning {
+		// 1) 分流策略：TUN 模式是四个模式之一，策略固定为「除局域网外全部走代理」。
+		//    不继承此前遗留的内核代理策略，否则会出现「开着 TUN 却还在按
+		//    绕过大陆分流」的自相矛盾状态。
+		if a.routingMode != "global" {
+			a.addLogInternal("info", fmt.Sprintf("TUN 模式接管分流策略: %s → global（局域网直连）", a.routingMode))
+			a.routingMode = "global"
+		}
+
+		// 2) Xray 内核（代理大脑）必须在线；策略变了要重启，未运行则静默拉起
+		if a.coreRunning {
+			if err := a.startCoreLocked(); err != nil {
+				a.addLogInternal("error", fmt.Sprintf("TUN: restart core for policy change failed: %v", err))
+				return a.tunRunning, fmt.Errorf("restart core failed: %v", err)
+			}
+		} else {
 			if err := a.startCoreLocked(); err != nil {
 				a.addLogInternal("error", fmt.Sprintf("TUN: start core failed: %v", err))
 				return a.tunRunning, fmt.Errorf("start core failed: %v", err)
@@ -1118,12 +1200,15 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			// 原生 tun2socks 只给网卡配了 IPv4，没有 tunGateway6，
 			// 因此这里不写 2000::/3（写了也是无效路由）。
 			a.addLogInternal("info", fmt.Sprintf("SSTap native engine ready | %d routes | policy %s | node: %s", nRouted, a.routingMode, node.Name))
+			// 刚接管流量：清掉此前（系统代理模式 / 旧节点）留下的 DNS 解析缓存，
+			// 否则检测站可能继续命中旧出口的解析结果。
+			flushDnsClientCache()
 			a.savePersisted()
 			tray.requestRebuild()
 			return a.tunRunning, nil
 		}
 
-		// 2) 常驻虚拟网卡（首次创建，之后复用；重启系统后依然存在）
+		// 3) 常驻虚拟网卡（首次创建，之后复用；重启系统后依然存在）
 		ifIdx, err := knTap.ensure()
 		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("TUN: adapter error: %v", err))
@@ -1136,7 +1221,7 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 			return a.tunRunning, err
 		}
 
-		// 3) 铺路由（DNS 劫持 + 节点 /32 防回环 + 按策略分流）并启动转发
+		// 4) 铺路由（DNS 劫持 + 节点 /32 防回环 + 按策略分流）并启动转发
 		// Go 路径会给网卡设置劫持 DNS（198.18.0.2），停止时需复位
 		a.tapDnsHijacked = true
 		hostRoutes, splitRoutes, nRouted, rtErr := applySstapRouting(*node, ifIdx, a.routingMode, a.settings.DnsServers)
@@ -1158,6 +1243,9 @@ func (a *App) SimpleConnect(start bool) (bool, error) {
 		a.tunRunning = true
 		a.addLogInternal("info", fmt.Sprintf("TUN interface %s ready | %d routes | policy %s | node: %s | egress: Xray SOCKS",
 			tunIfaceName, nRouted, a.routingMode, node.Name))
+		// 刚接管流量：清掉此前（系统代理模式 / 旧节点）留下的 DNS 解析缓存，
+		// 否则检测站可能继续命中旧出口的解析结果。
+		flushDnsClientCache()
 	} else {
 		// 关闭：停转发 + 撤路由；网卡常驻保留，下次开启秒级生效
 		a.stopNativeTun()

@@ -21,7 +21,7 @@ import (
 type NodeItem struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks, Hysteria2
+	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks, Hysteria2, AnyTLS
 	Address  string `json:"address"`
 	Port     int    `json:"port"`
 	UUID     string `json:"uuid"`
@@ -45,6 +45,7 @@ type NodeItem struct {
 	HostName    string `json:"hostName,omitempty"`
 	ServiceName string `json:"serviceName,omitempty"`
 	Method      string `json:"method,omitempty"`
+	Insecure    bool   `json:"insecure,omitempty"` // 跳过 TLS 证书校验（分享链接里的 insecure=1 / allowInsecure=1）
 }
 
 type SubscriptionItem struct {
@@ -116,6 +117,8 @@ type App struct {
 	lastUpSample    int64
 	lastDownSample  int64
 	xrayInst        *xcore.Instance
+	bridge          *anyTLSBridge // AnyTLS 协议桥（Xray 无 AnyTLS 出站，见 anytls.go）
+	bridgeAddr      string        // 桥的本地 SOCKS 地址，生成 Xray 出站时用
 	tunCmd          *exec.Cmd
 	tunRunning      bool
 	tunIfaceIdx     uint32
@@ -372,20 +375,29 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 	}
 
 	a.addLogInternal("info", fmt.Sprintf("Primary route switched to node: [%s] %s (%s:%d)", selected.Protocol, selected.Name, selected.Address, selected.Port))
-	// 合并架构：TUN 出站走本机 Xray，与节点解耦 —— 换节点只需重铺 /32 防回环路由
+
+	// 换节点必须让「出口 IP」立刻改变，这就要求把承载旧节点的连接全部拆掉：
+	//  - TUN 在跑：走完整切换（停转发 → 换内核 → 清 DNS 缓存 → 重铺路由 → 拉起转发）。
+	//    存量 TCP/keep-alive 连接挂在旧节点上不会自己迁移，只重铺路由是不够的。
+	//  - 仅系统代理：重启内核即可，新请求走新节点；同样要清 DNS 缓存。
 	if a.tunRunning {
-		if err := a.tunReapplyRoutesLocked(); err != nil {
+		if err := a.tunHardSwitchLocked(selected); err != nil {
+			// 切换失败则 TUN 已处于半拆状态，直接软停让流量回到直连，
+			// 避免留下「界面显示新节点、实际无隧道」的错配状态。
 			a.tunSoftStopLocked()
-			a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after node switch: %v", err))
+			a.addLogInternal("error", fmt.Sprintf("Failed to switch node in TUN mode: %v", err))
+			a.savePersisted()
+			return selected, err
 		}
-	}
-	if a.coreRunning {
+	} else if a.coreRunning {
 		if err := a.startCoreLocked(); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node switch: %v", err))
 			a.coreRunning = false
 			a.savePersisted()
 			return selected, err
 		}
+		// 清 DNS 缓存，否则检测站可能继续命中旧节点的解析结果。
+		flushDnsClientCache()
 	}
 	a.savePersisted()
 	return selected, nil
@@ -416,7 +428,7 @@ func (a *App) AddNode(node NodeItem) error {
 func (a *App) ImportNodesFromLinks(links string) (int, error) {
 	nodes := ParseShareLinks(links)
 	if len(nodes) == 0 {
-		return 0, fmt.Errorf("no valid share links found (supported: vmess/vless/trojan/ss/hysteria2)")
+		return 0, fmt.Errorf("no valid share links found (supported: vmess/vless/trojan/ss/hysteria2/anytls)")
 	}
 
 	a.mu.Lock()
@@ -463,18 +475,21 @@ func (a *App) UpdateNode(node NodeItem) error {
 	a.nodes[idx] = node
 	a.addLogInternal("info", fmt.Sprintf("Node updated: %s (%s:%d)", node.Name, node.Address, node.Port))
 
-	// 编辑的是当前活动节点且内核运行中 → 用新参数重启
-	if old.Active && a.coreRunning {
+	// 编辑的是当前活动节点 → 走完整切换，让存量连接一并断开、出口立即改变。
+	// （原先这里只重铺路由，挂在旧参数上的连接会继续用旧出口。）
+	if old.Active && a.tunRunning {
+		if err := a.tunHardSwitchLocked(node); err != nil {
+			a.tunSoftStopLocked()
+			a.addLogInternal("error", fmt.Sprintf("Failed to apply node edit in TUN mode: %v", err))
+			a.savePersisted()
+			return err
+		}
+	} else if old.Active && a.coreRunning {
 		if err := a.startCoreLocked(); err != nil {
 			a.coreRunning = false
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node edit: %v", err))
-		}
-	}
-	// 编辑的是当前活动节点且 TUN 运行中 → 重铺 /32 防回环路由（协议栈与网卡不动）
-	if old.Active && a.tunRunning {
-		if err := a.tunReapplyRoutesLocked(); err != nil {
-			a.tunSoftStopLocked()
-			a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after node edit: %v", err))
+		} else {
+			flushDnsClientCache()
 		}
 	}
 	a.savePersisted()
@@ -511,26 +526,36 @@ func (a *App) DeleteNodes(ids []string) error {
 
 	if wasActive {
 		a.activeNodeID = ""
+		var next *NodeItem
 		if len(a.nodes) > 0 {
 			a.nodes[0].Active = true
 			a.activeNodeID = a.nodes[0].ID
+			next = &a.nodes[0]
 		}
-		if a.coreRunning {
+		if !a.tunRunning {
+			// 没用 TUN：内核是唯一出口，活动节点没了就停内核，等用户重选。
+			if a.coreRunning {
+				a.stopCoreLocked()
+				a.coreRunning = false
+				a.addLogInternal("warn", "Active node deleted, core stopped; select a node and start again")
+			}
+		} else if next != nil {
+			// TUN 在跑：内核是转发协程的出口，不能停在「TUN 开着但没内核」的状态
+			// （那会让所有流量静默失败）。这里把内核拉起并做完整切换。
+			a.coreRunning = true
+			if err := a.tunHardSwitchLocked(*next); err != nil {
+				a.tunSoftStopLocked()
+				a.coreRunning = false
+				a.addLogInternal("error", fmt.Sprintf("Failed to switch TUN to a surviving node after deletion: %v", err))
+			} else {
+				a.addLogInternal("info", fmt.Sprintf("Active node deleted, switched to [%s] %s", next.Protocol, next.Name))
+			}
+		} else {
+			// 一个节点都不剩，没有任何东西可以代理 —— 只能停。
 			a.stopCoreLocked()
 			a.coreRunning = false
-			a.addLogInternal("warn", "Active node deleted, core stopped; select a node and start again")
-		}
-		// TUN 还挂在被删节点上：有其它节点则重铺路由继续跑，没有就软停止
-		if a.tunRunning {
-			if len(a.nodes) > 0 {
-				if err := a.tunReapplyRoutesLocked(); err != nil {
-					a.tunSoftStopLocked()
-					a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after active node deletion: %v", err))
-				}
-			} else {
-				a.tunSoftStopLocked()
-				a.addLogInternal("warn", "Active node deleted and no nodes left, TUN stopped")
-			}
+			a.tunSoftStopLocked()
+			a.addLogInternal("warn", "Active node deleted and no nodes left, TUN stopped")
 		}
 	}
 	a.addLogInternal("warn", fmt.Sprintf("Removed %d nodes", deletedCount))
@@ -739,6 +764,14 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 	if !valid {
 		mode = "bypass-cn"
 	}
+	// TUN 运行中不允许改分流策略：TUN 模式自己持有「除局域网外全部走代理」
+	// 这套策略（见 SimpleConnect），此时改策略会与之自相矛盾。
+	// 必须在改动任何状态之前拒绝，否则会把被拒绝的策略写进配置。
+	if a.tunRunning {
+		a.addLogInternal("warn", "Routing policy change rejected while TUN is active; turn TUN off first")
+		return false, fmt.Errorf("分流策略在 TUN 模式下不可修改，请先关闭 TUN")
+	}
+
 	a.routingMode = mode
 	modeLabel := "绕过大陆 (GFWList & CN)"
 	switch {
@@ -752,15 +785,6 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 		modeLabel = "SSTap 规则: " + filepath.Base(strings.TrimPrefix(mode, "sstap:"))
 	}
 	a.addLogInternal("info", fmt.Sprintf("Routing mode changed to: %s", modeLabel))
-
-	// TUN 运行中不允许改分流策略：TUN 只是「把流量送进虚拟网卡」这一层，
-	// 策略仍由内核 geoip/geosite 规则执行，两者是不同维度。在���直接拒绝，
-	// 避免出现「策略已改但路由重铺到一半」的中间状态。
-	if a.tunRunning {
-		a.addLogInternal("warn", "Routing policy change rejected while TUN is active; turn TUN off first")
-		a.savePersisted()
-		return false, fmt.Errorf("分流策略在 TUN 模式下不可修改，请先关闭 TUN")
-	}
 
 	if a.coreRunning {
 		if err := a.startCoreLocked(); err != nil {
@@ -890,12 +914,25 @@ func (a *App) refreshSubscription(id string) error {
 				a.addLogInternal("info", "Active node replaced by subscription refresh, core restarted")
 			}
 		}
-		// TUN 运行中且活动节点被替换 → 重铺 /32 防回环路由（协议栈与网卡不动）
+		// 活动节点被订阅替换 → 走完整切换：活动节点的服务器地址/凭据可能已变，
+		// 存量连接必须断开，否则出口 IP 仍停在旧节点上。
 		if a.tunRunning {
-			if err := a.tunReapplyRoutesLocked(); err != nil {
-				a.tunSoftStopLocked()
-				a.addLogInternal("error", fmt.Sprintf("Failed to re-route TUN after subscription update: %v", err))
+			var active NodeItem
+			foundActive := false
+			for _, n := range a.nodes {
+				if n.Active {
+					active, foundActive = n, true
+					break
+				}
 			}
+			if foundActive {
+				if err := a.tunHardSwitchLocked(active); err != nil {
+					a.tunSoftStopLocked()
+					a.addLogInternal("error", fmt.Sprintf("Failed to apply subscription update in TUN mode: %v", err))
+				}
+			}
+		} else if a.coreRunning {
+			flushDnsClientCache()
 		}
 	}
 

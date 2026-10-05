@@ -85,20 +85,6 @@ export default function App() {
     try { await WindowUnmaximise(); } catch (e) { /* 未最大化时忽略 */ }
     WindowSetSize(s.w, s.h);
   };
-  // 分流策略的中文说明。TUN 现在把全部流量交给虚拟网卡，实际走直连还是代理由
-  // 内核规则决定，所以界面描述必须跟随当前策略，不能再写死「大陆直连」。
-  const routingLabel = mode => {
-    switch (mode) {
-      case 'global': return '全部走代理';
-      case 'direct': return '全部直连';
-      case 'proxy-cn': return '仅代理国内';
-      case 'bypass-cn':
-      case undefined:
-      case null:
-      case '': return '大陆直连、海外代理';
-      default: return mode.startsWith('sstap:') ? '自定义规则' : '大陆直连、海外代理';
-    }
-  };
 
   // 节点延迟的展示文字与配色（简易模式节点下拉用）
   const delayText = d => d > 0 ? `${d}ms` : d === -2 ? '超时' : '未测';
@@ -415,8 +401,12 @@ export default function App() {
 
   const handleSimpleSelectNode = async (id) => {
     if (!id) return;
+    const target = nodes.find(n => n.id === id);
     try {
       await SelectNode(id);
+      if (target && status.tunnelMode) {
+        showToast(`已切换至「${target.name}」，已断开旧连接，请刷新页面查看新 IP`, 'success');
+      }
     } catch (e) {
       showToast('切换节点失败：' + (e?.message || e), 'error');
     }
@@ -477,6 +467,11 @@ export default function App() {
   };
 
   const handleRoutingChange = async (mode) => {
+    // 四个模式互斥：切到内核代理模式前先关闭 TUN，
+    // 否则后端会拒绝在 TUN 运行期间改策略。
+    if (status.tunnelMode) {
+      await handleToggleTun(false);
+    }
     try {
       await SetRoutingMode(mode);
     } catch (e) {
@@ -506,7 +501,14 @@ export default function App() {
 
     try {
       await SelectNode(id);
-      showToast(`已切换至「${target.name}」`, 'success');
+      // TUN 模式下换节点会强制断开存量连接（否则旧节点的 keep-alive 连接
+      // 会让出口 IP 看起来没变），提醒用户刷新页面而不是以为切换失败。
+      showToast(
+        status.tunnelMode
+          ? `已切换至「${target.name}」，已断开旧连接，请刷新页面查看新 IP`
+          : `已切换至「${target.name}」`,
+        'success'
+      );
     } catch (e) {
       showToast('切换节点失败：' + (e?.message || e), 'error');
     } finally {
@@ -1089,79 +1091,54 @@ export default function App() {
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                     {status.activeNodeName === '未选择节点'
                       ? '请在服务器节点列表中选择一个节点'
-                      : `${status.activeNodeProto}${status.tunnelMode ? ` · TUN 分流（${routingLabel(status.routingMode)}）` : ''}`}
+                      : `${status.activeNodeProto}${status.tunnelMode ? ' · TUN 模式（局域网直连，其余走代理）' : ''}`}
                   </p>
                 </div>
 
-                {/* Routing policy radio + TUN mode switch */}
+                {/* 代理模式：前三个走内核代理，第四个 TUN 走虚拟网卡，四者互斥 */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                     <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                      分流策略
-                      {status.tunnelMode && (
-                        <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: '6px' }}>
-                          （TUN 模式下不可改）
-                        </span>
-                      )}
+                      代理模式
                     </span>
                     <div
                       className="segmented-control"
-                      style={tunBusy || !!tunPending || status.tunnelMode
+                      style={tunBusy || !!tunPending
                         ? { opacity: 0.45, pointerEvents: 'none' }
                         : null}
                     >
                       <button
-                        className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
+                        className={`segment-btn ${!status.tunnelMode && status.routingMode === 'bypass-cn' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('bypass-cn')}
                       >
                         绕过大陆
                       </button>
                       <button
-                        className={`segment-btn ${status.routingMode === 'global' ? 'active' : ''}`}
+                        className={`segment-btn ${!status.tunnelMode && status.routingMode === 'global' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('global')}
                       >
                         全局代理
                       </button>
                       <button
-                        className={`segment-btn ${status.routingMode === 'direct' ? 'active' : ''}`}
+                        className={`segment-btn ${!status.tunnelMode && status.routingMode === 'direct' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('direct')}
                       >
                         全局直连
                       </button>
+                      <button
+                        className={`segment-btn ${status.tunnelMode ? 'active' : ''}`}
+                        onClick={() => handleToggleTun(!status.tunnelMode)}
+                        title="虚拟网卡接管全部流量（需管理员权限）"
+                      >
+                        TUN 模式
+                      </button>
                     </div>
-                  </div>
-
-                  <div style={{ width: '1px', height: '40px', background: 'var(--border-subtle)' }} />
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '250px', flexShrink: 0 }}>
-                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>TUN 模式</span>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-                      <span style={{
-                        fontSize: '11px',
-                        color: 'var(--text-tertiary)',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        flex: 1
-                      }}>
-                        {tunPending === 'on'
-                          ? '正在启动 TUN…'
-                          : tunPending === 'off'
-                            ? '正在关闭 TUN…'
-                            : status.tunnelMode
-                              ? `虚拟网卡接管全部流量 · ${routingLabel(status.routingMode)}`
-                              : '虚拟网卡接管全部流量（需管理员）'}
+                    {/* 仅在 TUN 启停过程中给出进度提示，其余时间不留冗余说明文字 */}
+                    {tunPending && (
+                      <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                        {tunPending === 'on' ? '正在启动 TUN…' : '正在关闭 TUN…'}
                       </span>
-                      <label className="win11-toggle" style={{ flexShrink: 0 }} title="开启后停用内核代理，由 TUN 虚拟网卡接管系统全部流量">
-                        <input
-                          type="checkbox"
-                          checked={tunPending ? tunPending === 'on' : !!status.tunnelMode}
-                          disabled={tunBusy}
-                          onChange={e => handleToggleTun(e.target.checked)}
-                        />
-                        <span className="toggle-track"><span className="toggle-thumb" /></span>
-                      </label>
-                    </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1771,6 +1748,7 @@ export default function App() {
                   <option value="VMess">VMess</option>
                   <option value="Trojan">Trojan</option>
                   <option value="Hysteria2">Hysteria2</option>
+                  <option value="AnyTLS">AnyTLS</option>
                   <option value="Shadowsocks">Shadowsocks</option>
                 </select>
               </div>
@@ -1838,7 +1816,7 @@ export default function App() {
           <div className="win11-dialog" onClick={e => e.stopPropagation()}>
             <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>批量导入分享链接</h2>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '4px 0 10px' }}>
-              每行一条，支持 vmess:// vless:// trojan:// ss:// hysteria2:// 链接，或直接粘贴 Base64 订阅内容。
+              每行一条，支持 vmess:// vless:// trojan:// ss:// hysteria2:// anytls:// 链接，或直接粘贴 Base64 订阅内容。
             </p>
             <div className="form-group">
               <textarea

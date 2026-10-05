@@ -147,6 +147,7 @@ export namespace main {
 	    hostName?: string;
 	    serviceName?: string;
 	    method?: string;
+	    insecure?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new NodeItem(source);
@@ -178,6 +179,7 @@ export namespace main {
 	        this.hostName = source["hostName"];
 	        this.serviceName = source["serviceName"];
 	        this.method = source["method"];
+	        this.insecure = source["insecure"];
 	    }
 	}
 	export class SubscriptionItem {

@@ -63,6 +63,24 @@ func runHidden(name string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// flushDnsClientCache 清空系统 DNS 客户端缓存。
+//
+// 换节点后必须调用：浏览器与系统会缓存 A 记录，检测站 / CDN 可能继续命中
+// 旧解析结果，导致「已切到新加坡、看到的却是韩国」的错觉。
+//
+// 优先走 ipconfig（秒级）；失败再退到 PowerShell 的
+// Clear-DnsClientCache（某些精简系统缺少 ipconfig）。两者都是本机调用，
+// 不需要管理员权限，因此非管理员路径下也能安全执行。
+func flushDnsClientCache() {
+	if out, err := runHidden("ipconfig", "/flushdns"); err != nil {
+		vlog("ipconfig /flushdns failed (%v): %s", err, strings.TrimSpace(string(out)))
+		if out2, err2 := runHidden("powershell", "-NoProfile", "-NonInteractive",
+			"-Command", "Clear-DnsClientCache"); err2 != nil {
+			vlog("Clear-DnsClientCache failed (%v): %s", err2, strings.TrimSpace(string(out2)))
+		}
+	}
+}
+
 var (
 	iphlpapi                        = windows.NewLazySystemDLL("iphlpapi.dll")
 	procGetBestRoute                = iphlpapi.NewProc("GetBestRoute")
@@ -90,7 +108,11 @@ func ensureSingBoxBin() (string, error) {
 		return "", err
 	}
 	exePath := filepath.Join(dir, "sing-box.exe")
-	if st, err := os.Stat(exePath); err == nil && st.Size() > 1024*1024 {
+	// 按「与内嵌副本字节数一致」判定，而不是「大文件就算好」：
+	// 升级内嵌 sing-box（比如为支持 AnyTLS 换到 1.13）后，老用户机器上残留的
+	// 旧版本文件同样有几 MB，会被旧判据当成有效而永远不重写，
+	// 结果 AnyTLS 桥报 "unknown outbound type: anytls"。
+	if st, err := os.Stat(exePath); err == nil && st.Size() == int64(len(singBoxBin)) {
 		return exePath, nil
 	}
 	if err := os.WriteFile(exePath, singBoxBin, 0755); err != nil {
@@ -158,9 +180,11 @@ func buildTunConfigJSON(node NodeItem, srsPath, bindIface string) (string, error
 		"log": map[string]interface{}{"level": "info"},
 		"dns": map[string]interface{}{
 			"strategy": "ipv4_only",
+			// sing-box 1.12 起 DNS server 改用 {type,server} 形式，
+			// 旧的 address:"udp://..." 写法在新版里是致命错误（1.14 直接删除）。
 			"servers": []map[string]interface{}{
-				{"tag": "dns-cn", "address": "udp://119.29.29.29", "detour": "direct"},
-				{"tag": "dns-fw", "address": "tcp://8.8.8.8", "detour": "proxy"},
+				{"type": "udp", "tag": "dns-cn", "server": "119.29.29.29", "detour": "direct"},
+				{"type": "tcp", "tag": "dns-fw", "server": "8.8.8.8", "detour": "proxy"},
 			},
 			"rules": []map[string]interface{}{
 				// 节点服务器域名必须直连 DNS 解析，否则解析服务器地址要走代理 -> 死锁
@@ -183,19 +207,23 @@ func buildTunConfigJSON(node NodeItem, srsPath, bindIface string) (string, error
 		}},
 		"outbounds": []map[string]interface{}{
 			proxyOut,
-			{"type": "dns", "tag": "dns-out"},
 			directOut,
 		},
 		"route": map[string]interface{}{
 			"rules": []map[string]interface{}{
-				{"port": 53, "outbound": "dns-out"},
-				{"ip_is_private": true, "outbound": "direct"},
+				// 53 端口交给 sing-box 内部 DNS 处理（旧版是 dns-out 出站，
+				// 新版路由规则改用 action，dns 出站已废弃）
+				{"port": 53, "action": "hijack-dns"},
+				{"ip_is_private": true, "action": "route", "outbound": "direct"},
 			},
 			"rule_set": []map[string]interface{}{{
 				"type": "local", "tag": "geosite-cn", "format": "binary", "path": srsPath,
 			}},
-			"final":                 "proxy",
-			"auto_detect_interface": true,
+			// 出站里 server 是域名时必须给出解析来源（1.12 起缺失即致命）。
+			// 指向 dns-cn：节点服务器地址必须直连解析，走代理解析会形成死锁
+			"default_domain_resolver": "dns-cn",
+			"final":                   "proxy",
+			"auto_detect_interface":   true,
 		},
 	}
 
@@ -283,6 +311,9 @@ func nodeToSingBoxOutbound(node NodeItem, bindIface string) (map[string]interfac
 		out["password"] = password
 	case "Hysteria2":
 		out["type"] = "hysteria2"
+		out["password"] = node.UUID
+	case "AnyTLS":
+		out["type"] = "anytls"
 		out["password"] = node.UUID
 	default:
 		return nil, fmt.Errorf("TUN mode does not support protocol: %s", node.Protocol)
