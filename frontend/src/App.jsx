@@ -1174,28 +1174,16 @@ export default function App() {
               </div>
 
               {account && account.loggedIn && (
-                <div className="win11-card account-card">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <h4 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                          {account.email}
-                        </h4>
-                        <span style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--accent-subtle)' }}>
-                          {account.planName || 'KNcloud 会员'}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                        已用 {fmtGB(account.usedUp + account.usedDown)} / {account.transferEnable > 0 ? fmtGB(account.transferEnable) : '无限'} · {account.expire}
-                        {subscriptions[0] && (
-                          <div style={{ color: 'var(--text-tertiary)', marginTop: '3px', fontSize: '11px' }}>
-                            上次同步: {subscriptions[0].updatedAt}
-                          </div>
-                        )}
-                      </div>
+                <div className="win11-card account-card acct">
+                  <div className="acct-head">
+                    <div className="acct-id">
+                      <span className="acct-email">{account.email}</span>
+                      <span className="acct-plan">{account.planName || 'KNcloud 会员'}</span>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
-                      {speedStats}
+                    <div className="acct-actions">
+                      {subscriptions[0] && (
+                        <span className="acct-sync">上次同步 {subscriptions[0].updatedAt}</span>
+                      )}
                       <button className="win11-btn" onClick={handleUpdateSubscription} disabled={syncing}>
                         <RefreshCw size={13} className={syncing ? 'spin' : ''} />
                         <span>{syncing ? '更新中...' : '更新订阅'}</span>
@@ -1205,12 +1193,31 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-                  <div className="simple-account-bar" style={{ marginTop: '14px' }}>
-                    <div style={{
-                      width: account.transferEnable > 0
-                        ? Math.min(100, Math.round((account.usedUp + account.usedDown) * 100 / account.transferEnable)) + '%'
-                        : '0%'
-                    }} />
+                  <div className="acct-stats">
+                    <div className="acct-stat acct-usage">
+                      <div className="acct-label">流量 · {account.expire}</div>
+                      <div className="acct-value">
+                        {fmtGB(account.usedUp + account.usedDown)}
+                        <span className="acct-sub"> / {account.transferEnable > 0 ? fmtGB(account.transferEnable) : '无限'}</span>
+                      </div>
+                      <div className="simple-account-bar acct-bar">
+                        <div style={{
+                          width: account.transferEnable > 0
+                            ? Math.min(100, Math.max(1, Math.round((account.usedUp + account.usedDown) * 100 / account.transferEnable))) + '%'
+                            : '0%'
+                        }} />
+                      </div>
+                    </div>
+                    <div className="acct-stat" title="仅统计经代理节点的流量">
+                      <div className="acct-label"><ArrowUpRight size={13} className="acct-up" />上传</div>
+                      <div className="acct-value">{status.upSpeed}</div>
+                      <div className="acct-sub">累计 {status.totalUp}</div>
+                    </div>
+                    <div className="acct-stat" title="仅统计经代理节点的流量">
+                      <div className="acct-label"><ArrowDownLeft size={13} className="acct-down" />下载</div>
+                      <div className="acct-value">{status.downSpeed}</div>
+                      <div className="acct-sub">累计 {status.totalDown}</div>
+                    </div>
                   </div>
                 </div>
               )}

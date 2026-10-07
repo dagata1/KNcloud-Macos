@@ -1581,3 +1581,41 @@ select.win11-input option {
   white-space: nowrap;
   flex-shrink: 0;
 }
+
+/* ---------- 订阅卡（账户 + 流量 + 实时速率一体） ---------- */
+.acct { padding: 0; overflow: hidden; }
+.acct-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 16px 20px;
+}
+.acct-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.acct-email {
+  font-size: 15px; font-weight: 600; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.acct-plan {
+  font-size: 12px; font-weight: 600; color: var(--accent);
+  padding: 2px 8px; border-radius: 6px; background: var(--accent-subtle); white-space: nowrap;
+}
+.acct-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.acct-sync { font-size: 11px; color: var(--text-tertiary); margin-right: 6px; white-space: nowrap; }
+.acct-stats {
+  display: grid; grid-template-columns: 1.6fr 1fr 1fr;
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(127, 127, 127, 0.04);
+}
+.acct-stat { padding: 14px 20px 16px; min-width: 0; }
+.acct-stat + .acct-stat { border-left: 1px solid var(--border-subtle); }
+.acct-label {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-secondary); white-space: nowrap;
+}
+.acct-value {
+  margin-top: 6px; font-size: 18px; font-weight: 700; color: var(--text-primary);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.acct-sub { font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin-top: 2px; white-space: nowrap; }
+.acct-value .acct-sub { font-size: 12px; }
+.acct-bar { margin-top: 10px; }
+.acct-up { color: #3b9ced; }
+.acct-down { color: #2fb36d; }

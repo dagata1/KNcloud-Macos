@@ -11,7 +11,8 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// trayIconData 是托盘图标：白色 KN 字标 + 全透明背景（16~256 多尺寸 ICO）。
+// trayIconData 是托盘图标：蓝色圆角底 + 白色 KN 字标，铺满整格（16~256 多尺寸 ICO），
+// 深色/浅色任务栏都清晰，比纯字标显得更大。
 // 不能用 build/windows/icon.ico —— 那个是应用图标，背景是不透明的黑色方块，
 // 放进深色任务栏会变成一坨黑。
 //
@@ -151,25 +152,28 @@ func (t *trayController) buildMenu() {
 	activeName := ""
 	for i := range nodes {
 		if nodes[i].Active {
-			activeName = fmt.Sprintf("%s %s", nodes[i].Protocol, truncateRunes(nodes[i].Name, 22))
+			activeName = truncateRunes(nodes[i].Name, 40)
 			break
 		}
 	}
 
-	statusText := "未连接"
-	switch {
-	case tunRunning:
-		statusText = "TUN 模式运行中"
-	case coreRunning:
-		statusText = "代理运行中"
+	// 悬停提示：「代理模式 - 代理节点」，如「绕过大陆 - 日本[V6]」；未连接时显示「未连接」
+	modeLabel := map[string]string{"bypass-cn": "绕过大陆", "global": "全局代理", "direct": "全局直连"}[routingMode]
+	if modeLabel == "" {
+		modeLabel = "绕过大陆"
+	}
+	if tunRunning {
+		modeLabel = "TUN 模式"
 	}
 
 	systray.ResetMenu()
 
-	// 运行状态与当前节点不再占用菜单行，只留在鼠标悬停的 tooltip 里
-	statusLabel := "KNcloud-WIN · " + statusText
-	if activeName != "" {
-		statusLabel += " · " + activeName
+	statusLabel := "未连接"
+	if tunRunning || coreRunning {
+		statusLabel = modeLabel
+		if activeName != "" {
+			statusLabel += " - " + activeName
+		}
 	}
 	systray.SetTooltip(statusLabel)
 
