@@ -48,10 +48,12 @@ type NodeItem struct {
 	Insecure    bool   `json:"insecure,omitempty"` // 跳过 TLS 证书校验（分享链接里的 insecure=1 / allowInsecure=1）
 }
 
+// SubscriptionItem.URL 订阅地址内含 token，敏感度与登录凭证相当：带 json:"-" 不下发前端
+// （前端从不读取），持久化由 persistedConfig.SubscriptionURLs 按 ID 单独加密存取（见 config.go）。
 type SubscriptionItem struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
-	URL       string `json:"url"`
+	URL       string `json:"-"`
 	NodeCount int    `json:"nodeCount"`
 	UpdatedAt string `json:"updatedAt"`
 	AutoCheck bool   `json:"autoCheck"`
@@ -132,7 +134,7 @@ type App struct {
 	tap             *tapForwarder     // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
 	nativeTunCmd    *exec.Cmd         // C/lwIP tun2socks helper, SSTap-compatible fast path
 	nativeTunDone   chan struct{}
-	tapDnsHijacked  bool              // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
+	tapDnsHijacked  bool // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
 	tunSampleUp     int64
 	tunSampleDown   int64
 	account         AccountInfo

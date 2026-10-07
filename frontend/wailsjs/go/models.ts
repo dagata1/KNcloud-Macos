@@ -10,8 +10,6 @@ export namespace main {
 	    usedUp: number;
 	    usedDown: number;
 	    expire: string;
-	    authToken: string;
-	    subUrl: string;
 	    subId: string;
 	
 	    static createFrom(source: any = {}) {
@@ -29,8 +27,6 @@ export namespace main {
 	        this.usedUp = source["usedUp"];
 	        this.usedDown = source["usedDown"];
 	        this.expire = source["expire"];
-	        this.authToken = source["authToken"];
-	        this.subUrl = source["subUrl"];
 	        this.subId = source["subId"];
 	    }
 	}
@@ -185,7 +181,6 @@ export namespace main {
 	export class SubscriptionItem {
 	    id: string;
 	    name: string;
-	    url: string;
 	    nodeCount: number;
 	    updatedAt: string;
 	    autoCheck: boolean;
@@ -198,7 +193,6 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
-	        this.url = source["url"];
 	        this.nodeCount = source["nodeCount"];
 	        this.updatedAt = source["updatedAt"];
 	        this.autoCheck = source["autoCheck"];
