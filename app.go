@@ -130,6 +130,7 @@ type App struct {
 	tunPhys         physHop        // TUN 开启时的默认物理出口（绕过网段用）
 	tunEgressIface  string         // TUN 开启时的物理网卡名：Xray 出站 sockopt.interface 绑定它；空表示 TUN 未接管
 	tunUDPPort      int            // TUN 开启时 UDP 专用（不嗅探）SOCKS 入站端口；0 = 未启用
+	tunDNSGuard     *tunDNSGuard   // TUN 开启时拦截发往物理网卡 DNS 的查询（WFP 动态会话）
 	tunV6           bool           // 是否写过 2000::/3 防泄漏路由
 	prevRoutingMode string         // TUN 开启时被临时改写前的策略（全局直连 → 全局），关闭时恢复
 	tunSampleUp     int64

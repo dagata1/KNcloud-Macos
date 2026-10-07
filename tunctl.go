@@ -288,6 +288,14 @@ func (a *App) tunStartLocked() error {
 			return fail(err)
 		}
 		a.tapDnsHijacked = true
+		// Windows 会并行去问所有网卡的 DNS（SMHNR），不拦就会拿到物理网卡上运营商的答案
+		v4, v6 := physDNSServers(phys.IfIndex)
+		if g, err := newTunDNSGuard(v4, v6); err != nil {
+			a.addLogInternal("warn", fmt.Sprintf("TUN: DNS leak guard not installed (physical DNS %v %v): %v", v4, v6, err))
+		} else if g != nil {
+			a.tunDNSGuard = g
+			a.addLogInternal("info", fmt.Sprintf("TUN: DNS leak guard on, blocking port 53 to physical DNS %v %v", v4, v6))
+		}
 	} else {
 		clearTapAdapterDNS(ifIdx)
 	}
@@ -326,6 +334,10 @@ func (a *App) tunSoftStopLocked() {
 	a.stopNativeTun()
 	a.stopTapForwarding()
 	a.removeTapRouting()
+	if a.tunDNSGuard != nil {
+		a.tunDNSGuard.Close()
+		a.tunDNSGuard = nil
+	}
 	a.tunIfaceIdx = 0
 	a.tunRunning = false
 	if a.prevRoutingMode != "" {
