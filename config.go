@@ -15,7 +15,9 @@ type persistedConfig struct {
 	ActiveNodeID  string             `json:"activeNodeID"`
 	TotalUp       int64              `json:"totalUp"`
 	TotalDown     int64              `json:"totalDown"`
-	Account       *AccountInfo       `json:"account"`
+	// StatsVersion 累计流量的统计口径（见 traffic.go）；低于 trafficStatsVersion 的累计值作废
+	StatsVersion int          `json:"statsVersion,omitempty"`
+	Account      *AccountInfo `json:"account"`
 	// AccountToken 是加密后的登录凭证（DPAPI，见 credstore.go）。
 	// AccountInfo.AuthToken 带 json:"-"（不下发给前端，见 account.go），
 	// 因此不会被上面的 Account 字段一起序列化，必须在这里单独存取，
@@ -92,11 +94,9 @@ func (a *App) loadPersisted() bool {
 		a.routingMode = cfg.RoutingMode
 	}
 	a.activeNodeID = cfg.ActiveNodeID
-	if cfg.TotalUp > 0 {
-		a.totalUpBytes = cfg.TotalUp
-	}
-	if cfg.TotalDown > 0 {
-		a.totalDownBytes = cfg.TotalDown
+	// 旧口径（入站计数 / TUN 网卡计数）累计的数字含直连流量、方向也可能反了，直接作废
+	if cfg.StatsVersion >= trafficStatsVersion && (cfg.TotalUp > 0 || cfg.TotalDown > 0) {
+		a.traffic.setTotals(cfg.TotalUp, cfg.TotalDown)
 	}
 	if cfg.Account != nil {
 		a.account = *cfg.Account
@@ -194,14 +194,16 @@ func (a *App) savePersisted() {
 	if path == "" {
 		return
 	}
+	totalUp, totalDown := a.traffic.totals()
 	cfg := persistedConfig{
+		TotalUp:       totalUp,
+		TotalDown:     totalDown,
 		Nodes:         a.nodes,
 		Subscriptions: a.subscriptions,
 		Settings:      a.settings,
 		RoutingMode:   a.persistedRoutingMode(),
 		ActiveNodeID:  a.activeNodeID,
-		TotalUp:       a.totalUpBytes,
-		TotalDown:     a.totalDownBytes,
+		StatsVersion:  trafficStatsVersion,
 		Account:       &a.account,
 	}
 	// 凭证加密后落盘。加密失败时宁可不写：安全功能必须 fail-closed，

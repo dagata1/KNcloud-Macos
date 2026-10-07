@@ -111,12 +111,8 @@ type App struct {
 	systemProxy     bool
 	routingMode     string
 	activeNodeID    string
-	totalUpBytes    int64
-	totalDownBytes  int64
-	lastUpSpeed     string
-	lastDownSpeed   string
-	lastUpSample    int64
-	lastDownSample  int64
+	traffic         trafficMeter    // 经代理节点的流量统计（独立锁，见 traffic.go）
+	statsInst       statsInstHolder // 当前内核实例（采样协程无锁读取）
 	xrayInst        *xcore.Instance
 	coreNodeID      string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
 	tunRunning      bool
@@ -133,8 +129,6 @@ type App struct {
 	tunDNSGuard     *tunDNSGuard   // TUN 开启时拦截发往物理网卡 DNS 的查询（WFP 动态会话）
 	tunV6           bool           // 是否写过 2000::/3 防泄漏路由
 	prevRoutingMode string         // TUN 开启时被临时改写前的策略（全局直连 → 全局），关闭时恢复
-	tunSampleUp     int64
-	tunSampleDown   int64
 	account         AccountInfo
 	quitting        bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
 	cleaned         bool             // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
@@ -162,8 +156,6 @@ func NewApp() *App {
 		},
 		nodes:         []NodeItem{},
 		subscriptions: []SubscriptionItem{},
-		lastUpSpeed:   "0 B/s",
-		lastDownSpeed: "0 B/s",
 	}
 
 	app.account = defaultAccount()
@@ -244,7 +236,7 @@ func (a *App) startup(ctx context.Context) {
 	// 系统托盘：右下角常驻图标 + 右键菜单
 	startTray(a)
 
-	// 真实内核流量统计轮询：每秒采样一次计数器
+	// 真实内核流量统计轮询：每秒采样一次 proxy 出站计数器（只算经节点的流量，见 traffic.go）
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -254,31 +246,7 @@ func (a *App) startup(ctx context.Context) {
 			case <-a.ctx.Done():
 				return
 			case <-ticker.C:
-				up, down, ok := a.tunTrafficSample()
-				if !ok {
-					up, down, ok = a.coreTrafficSample()
-				}
-				a.mu.Lock()
-				if ok {
-					du := up - a.lastUpSample
-					dd := down - a.lastDownSample
-					if du < 0 {
-						du = up
-					}
-					if dd < 0 {
-						dd = down
-					}
-					a.lastUpSample = up
-					a.lastDownSample = down
-					a.totalUpBytes += du
-					a.totalDownBytes += dd
-					a.lastUpSpeed = formatSpeed(du)
-					a.lastDownSpeed = formatSpeed(dd)
-				} else {
-					a.lastUpSpeed = "0 B/s"
-					a.lastDownSpeed = "0 B/s"
-				}
-				a.mu.Unlock()
+				a.sampleTraffic()
 			}
 		}
 	}()
@@ -785,8 +753,19 @@ func (a *App) PingAllNodes() []NodeItem {
 
 func (a *App) GetCoreStatus() CoreStatus {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
+	st := a.coreStatusLocked()
+	a.mu.RUnlock()
+	// 流量数字有独立的锁（见 traffic.go）
+	upSpeed, downSpeed, totalUp, totalDown := a.traffic.snapshot()
+	st.UpSpeed = formatSpeed(upSpeed)
+	st.DownSpeed = formatSpeed(downSpeed)
+	st.TotalUp = formatBytes(totalUp)
+	st.TotalDown = formatBytes(totalDown)
+	return st
+}
 
+// coreStatusLocked 状态中受 a.mu 保护的部分（调用方持有读锁或写锁）。
+func (a *App) coreStatusLocked() CoreStatus {
 	activeName := "未选择节点"
 	activeProto := "无"
 	for _, n := range a.nodes {
@@ -796,17 +775,12 @@ func (a *App) GetCoreStatus() CoreStatus {
 			break
 		}
 	}
-
 	return CoreStatus{
 		Running:         a.coreRunning || a.tunRunning,
 		CoreType:        a.settings.CoreType,
 		CoreVersion:     xrayCoreVersion(),
 		SystemProxy:     a.systemProxy,
 		RoutingMode:     a.routingMode,
-		UpSpeed:         a.lastUpSpeed,
-		DownSpeed:       a.lastDownSpeed,
-		TotalUp:         formatBytes(a.totalUpBytes),
-		TotalDown:       formatBytes(a.totalDownBytes),
 		ActiveNodeName:  activeName,
 		ActiveNodeProto: activeProto,
 		SocksPort:       a.settings.SocksPort,
@@ -841,8 +815,7 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 			a.tunSoftStopLocked()
 			a.addLogInternal("warn", "TUN soft-stopped along with core")
 		}
-		a.lastUpSpeed = "0 B/s"
-		a.lastDownSpeed = "0 B/s"
+		a.traffic.resetSpeed()
 		a.addLogInternal("warn", "Core stopped, no longer forwarding traffic")
 		if a.systemProxy {
 			setWindowsSystemProxy(false, "")

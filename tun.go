@@ -480,20 +480,3 @@ func ifaceHasAddr(ifIdx uint32, ip string) bool {
 	}
 	return false
 }
-
-// tunTrafficSample 通过 Windows IP Helper 采样 TUN 网卡流量（简易/全局模式下的真实速率）
-func (a *App) tunTrafficSample() (up, down int64, ok bool) {
-	a.mu.RLock()
-	idx := a.tunIfaceIdx
-	running := a.tunRunning
-	a.mu.RUnlock()
-	if !running || idx == 0 {
-		return 0, 0, false
-	}
-	row := windows.MibIfRow2{}
-	row.InterfaceIndex = idx
-	if err := windows.GetIfEntry2Ex(0, &row); err != nil {
-		return 0, 0, false
-	}
-	return int64(row.OutOctets), int64(row.InOctets), true
-}

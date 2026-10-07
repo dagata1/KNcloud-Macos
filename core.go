@@ -19,7 +19,6 @@ import (
 	"github.com/xtls/xray-core/common"
 	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/outbound"
-	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/infra/conf/serial"
 
 	_ "github.com/xtls/xray-core/app/dispatcher"
@@ -421,6 +420,7 @@ func (a *App) startCoreLocked() error {
 		return fmt.Errorf("failed to start core: %w", err)
 	}
 	a.xrayInst = inst
+	a.statsInst.set(inst)
 	a.coreNodeID = node.ID
 	a.addLogInternal("info", fmt.Sprintf("Xray-core %s started | SOCKS5 127.0.0.1:%d / HTTP 127.0.0.1:%d | node: %s",
 		xrayCoreVersion(), a.settings.SocksPort, a.settings.HttpPort, node.Name))
@@ -454,33 +454,8 @@ func (a *App) stopCoreLocked() {
 		}
 		a.xrayInst = nil
 	}
+	a.statsInst.set(nil)
 	a.coreNodeID = ""
-}
-
-// coreTrafficSample 读取内核流量计数器（字节），用于实时速率显示
-func (a *App) coreTrafficSample() (up, down int64, ok bool) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.xrayInst == nil {
-		return 0, 0, false
-	}
-	feat := a.xrayInst.GetFeature(stats.ManagerType())
-	if feat == nil {
-		return 0, 0, false
-	}
-	mgr, ok2 := feat.(stats.Manager)
-	if !ok2 {
-		return 0, 0, false
-	}
-	for _, tag := range []string{"socks-in", "http-in", tunUDPInboundTag} {
-		if c := mgr.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", tag)); c != nil {
-			up += c.Value()
-		}
-		if c := mgr.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", tag)); c != nil {
-			down += c.Value()
-		}
-	}
-	return up, down, true
 }
 
 // testNodeRealDelay 真连接测速：为该节点临时启动一个独立 Xray 实例（随机端口 SOCKS 入站），
