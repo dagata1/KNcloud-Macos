@@ -201,7 +201,7 @@ func (a *App) savePersisted() {
 		Nodes:         a.nodes,
 		Subscriptions: a.subscriptions,
 		Settings:      a.settings,
-		RoutingMode:   a.persistedRoutingMode(),
+		RoutingMode:   a.routingMode,
 		ActiveNodeID:  a.activeNodeID,
 		StatsVersion:  trafficStatsVersion,
 		Account:       &a.account,
@@ -301,14 +301,6 @@ func legacySubscriptionURLs(data []byte) map[string]string {
 		}
 	}
 	return out
-}
-
-// persistedRoutingMode 落盘的策略：TUN 临时改写的策略不落盘，保存用户原来的选择。
-func (a *App) persistedRoutingMode() string {
-	if a.prevRoutingMode != "" {
-		return a.prevRoutingMode
-	}
-	return a.routingMode
 }
 
 // removeLegacySingBoxFiles 清理旧版本释放到配置目录的 sing-box 相关文件

@@ -102,41 +102,41 @@ type AppSettings struct {
 }
 
 type App struct {
-	ctx             context.Context
-	mu              sync.RWMutex
-	nodes           []NodeItem
-	subscriptions   []SubscriptionItem
-	logMu           sync.Mutex // 单独保护 logs / logIDCounter：日志会被托盘、测速等
-	logs            []LogItem  // 未持 a.mu 的 goroutine 写入，不能共用 a.mu
-	logIDCounter    int64
-	settings        AppSettings
-	coreRunning     bool
-	systemProxy     bool
-	routingMode     string
-	activeNodeID    string
-	traffic         trafficMeter               // 经代理节点的流量统计（独立锁，见 traffic.go）
-	statsInst       statsInstHolder            // 当前内核实例（采样协程无锁读取）
-	statusCache     atomic.Pointer[CoreStatus] // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
-	xrayInst        *xcore.Instance
-	coreNodeID      string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
-	tunRunning      bool
-	tunIfaceIdx     uint32
-	tap             *tapForwarder // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
-	nativeTunCmd    *exec.Cmd     // C/lwIP tun2socks helper, SSTap-compatible fast path
-	nativeTunDone   chan struct{}
-	tapDnsHijacked  bool           // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
-	tunRt           *tunRouteState // TUN 写入系统的全部 IPv4 路由记账（差量同步，见 tunroutes.go）
-	tunOps          routeOps       // 路由操作实现；nil 表示 Windows IP Helper（单测注入 fake）
-	tunPhys         physHop        // TUN 开启时的默认物理出口（绕过网段用）
-	tunEgressIface  string         // TUN 开启时的物理网卡名：Xray 出站 sockopt.interface 绑定它；空表示 TUN 未接管
-	tunUDPPort      int            // TUN 开启时 UDP 专用（不嗅探）SOCKS 入站端口；0 = 未启用
-	tunDNSGuard     *tunDNSGuard   // TUN 开启时拦截发往物理网卡 DNS 的查询（WFP 动态会话）
-	tunV6           bool           // 是否写过 2000::/3 防泄漏路由
-	prevRoutingMode string         // TUN 开启时被临时改写前的策略（全局直连 → 全局），关闭时恢复
-	account         AccountInfo
-	quitting        bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
-	cleaned         bool             // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
-	webLogin        *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
+	ctx               context.Context
+	mu                sync.RWMutex
+	nodes             []NodeItem
+	subscriptions     []SubscriptionItem
+	logMu             sync.Mutex // 单独保护 logs / logIDCounter：日志会被托盘、测速等
+	logs              []LogItem  // 未持 a.mu 的 goroutine 写入，不能共用 a.mu
+	logIDCounter      int64
+	settings          AppSettings
+	coreRunning       bool
+	systemProxy       bool
+	routingMode       string
+	activeNodeID      string
+	traffic           trafficMeter               // 经代理节点的流量统计（独立锁，见 traffic.go）
+	statsInst         statsInstHolder            // 当前内核实例（采样协程无锁读取）
+	statusCache       atomic.Pointer[CoreStatus] // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
+	xrayInst          *xcore.Instance
+	coreNodeID        string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
+	tunRunning        bool
+	tunIfaceIdx       uint32
+	tap               *tapForwarder // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
+	nativeTunCmd      *exec.Cmd     // C/lwIP tun2socks helper, SSTap-compatible fast path
+	nativeTunDone     chan struct{}
+	tapDnsHijacked    bool           // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
+	tunRt             *tunRouteState // TUN 写入系统的全部 IPv4 路由记账（差量同步，见 tunroutes.go）
+	tunOps            routeOps       // 路由操作实现；nil 表示 Windows IP Helper（单测注入 fake）
+	tunPhys           physHop        // TUN 开启时的默认物理出口（绕过网段用）
+	tunEgressIface    string         // TUN 开启时的物理网卡名：Xray 出站 sockopt.interface 绑定它；空表示 TUN 未接管
+	tunUDPPort        int            // TUN 开启时 UDP 专用（不嗅探）SOCKS 入站端口；0 = 未启用
+	tunDNSGuard       *tunDNSGuard   // TUN 开启时拦截发往物理网卡 DNS 的查询（WFP 动态会话）
+	tunV6             bool           // 是否写过 2000::/3 防泄漏路由
+	tunPausedSysProxy bool           // TUN 开启时暂停了 Windows 系统代理，关 TUN 时恢复
+	account           AccountInfo
+	quitting          bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
+	cleaned           bool             // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
+	webLogin          *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
 }
 
 func NewApp() *App {
@@ -847,6 +847,13 @@ func (a *App) ToggleSystemProxy(enable bool) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// TUN 接管期间系统代理处于暂停状态：只记下用户的选择，关 TUN 时按它恢复
+	if a.tunRunning {
+		a.tunPausedSysProxy = enable
+		a.addLogInternal("info", fmt.Sprintf("System proxy preference recorded (%v); applied when TUN stops", enable))
+		tray.requestRebuild()
+		return a.systemProxy, nil
+	}
 	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
 	if err := setWindowsSystemProxy(enable, server); err != nil {
 		a.addLogInternal("error", fmt.Sprintf("Failed to set Windows system proxy: %v", err))
@@ -873,23 +880,20 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 	if !valid {
 		mode = "bypass-cn"
 	}
-	// TUN 运行中：绕过大陆 / 全局 / 规则文件 —— 路由差量 + Xray 规则热替换，TUN 不断；
-	// 全局直连 —— TUN 没有意义，先关 TUN 再按直连处理。
+	// 四个模式互斥：TUN 运行中选择任一策略 = 关 TUN、回到系统代理模式并应用该策略。
+	// 先写策略再软停：软停里重启内核时直接按新策略生成配置，不必再热替换一次。
 	if a.tunRunning {
-		if mode != "direct" {
-			if err := a.tunSetPolicyLocked(mode); err != nil {
-				a.addLogInternal("error", fmt.Sprintf("Routing policy change in TUN mode failed: %v", err))
-				a.savePersisted()
-				tray.requestRebuild()
-				return false, err
-			}
+		a.routingMode = mode
+		a.tunSoftStopLocked()
+		a.addLogInternal("info", fmt.Sprintf("TUN stopped: switched to system-proxy mode (%s)", mode))
+		if !a.coreRunning {
 			a.savePersisted()
 			tray.requestRebuild()
-			return true, nil
+			return false, fmt.Errorf("core is not running after leaving TUN mode")
 		}
-		a.prevRoutingMode = ""
-		a.tunSoftStopLocked()
-		a.addLogInternal("info", "TUN stopped: switching to direct mode")
+		a.savePersisted()
+		tray.requestRebuild()
+		return true, nil
 	}
 
 	a.routingMode = mode
@@ -905,6 +909,7 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 		modeLabel = "SSTap 规则: " + filepath.Base(strings.TrimPrefix(mode, "sstap:"))
 	}
 	a.addLogInternal("info", fmt.Sprintf("Routing mode changed to: %s", modeLabel))
+	defer tray.requestRebuild()
 
 	if a.coreRunning {
 		// 优先就地替换路由规则并切断旧连接（入站不断、keep-alive 连接立即按新策略出站）；

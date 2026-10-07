@@ -173,30 +173,21 @@ func (t *trayController) buildMenu() {
 	}
 	systray.SetTooltip(statusLabel)
 
-	// ---------- 模式选择 ----------
-	miMode := systray.AddMenuItem("模式选择", "选择代理方式：内核代理或 TUN 虚拟网卡")
-	childProxy := miMode.AddSubMenuItemCheckbox("代理模式", "内核代理 + 系统代理（127.0.0.1 本地端口）", !tunRunning)
-	childProxy.Click(func() { go a.traySetMode("proxy") })
-	childTun := miMode.AddSubMenuItemCheckbox("TUN 模式", "虚拟网卡接管全部流量，实际直连/代理由「路由模式」决定（需管理员权限）", tunRunning)
-	childTun.Click(func() { go a.traySetMode("tun") })
-
-	// ---------- 分流模式 ----------
-	miRouting := systray.AddMenuItem("路由模式", "切换分流策略")
-	// TUN 运行时「绕过大陆 / 全局」直接在 TUN 上热切换（路由差量，不断 TUN）；
-	// 「全局直连」与 TUN 互斥，TUN 运行时置灰（关 TUN 走「模式选择 → 代理模式」）。
-	for _, m := range []struct{ id, label string }{
-		{"bypass-cn", "绕过大陆"},
-		{"global", "全局代理"},
-		{"direct", "全局直连"},
+	// ---------- 代理模式（与仪表盘四个按钮一致，四选一互斥） ----------
+	// 绕过大陆 / 全局代理 / 全局直连 = 系统代理模式下的分流策略；TUN 模式 = 虚拟网卡全局接管。
+	// TUN 运行时只勾 TUN；点任一策略即关 TUN 并按该策略回到系统代理模式。
+	miMode := systray.AddMenuItem("代理模式", "绕过大陆 / 全局代理 / 全局直连 / TUN 模式（四选一）")
+	for _, m := range []struct{ id, label, tip string }{
+		{"bypass-cn", "绕过大陆", "系统代理：国内直连，其余走代理"},
+		{"global", "全局代理", "系统代理：全部走代理（局域网除外）"},
+		{"direct", "全局直连", "系统代理：全部直连"},
 	} {
-		child := miRouting.AddSubMenuItemCheckbox(m.label, "", routingMode == m.id)
+		child := miMode.AddSubMenuItemCheckbox(m.label, m.tip, !tunRunning && routingMode == m.id)
 		modeID := m.id
-		if tunRunning && modeID == "direct" {
-			child.Disable()
-			continue
-		}
 		child.Click(func() { go a.traySetRoutingMode(modeID) })
 	}
+	childTun := miMode.AddSubMenuItemCheckbox("TUN 模式", "虚拟网卡全局接管整机流量（需管理员权限）", tunRunning)
+	childTun.Click(func() { go a.traySetTun() })
 
 	// ---------- 切换节点 ----------
 	miNodes := systray.AddMenuItem("切换节点", "选择要使用的代理节点")
@@ -245,21 +236,15 @@ func truncateRunes(s string, max int) string {
 
 // ------------------------- 托盘菜单动作 -------------------------
 
-// traySetMode 切换代理模式：proxy=内核代理+系统代理，tun=TUN 虚拟网卡。
-// 两种模式互斥，SimpleConnect 内部负责停/恢复另一模式与系统代理。
-func (a *App) traySetMode(mode string) {
+// traySetTun 托盘「TUN 模式」：未开则开（全局接管）；已开时再点保持不变（与仪表盘一致，
+// 退出 TUN 通过选择其它三个模式之一）。
+func (a *App) traySetTun() {
 	a.mu.RLock()
 	tunRunning := a.tunRunning
 	a.mu.RUnlock()
-
-	switch {
-	case mode == "tun" && !tunRunning:
+	if !tunRunning {
 		if _, err := a.SimpleConnect(true); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Tray: switch to TUN mode failed: %v", err))
-		}
-	case mode == "proxy" && tunRunning:
-		if _, err := a.SimpleConnect(false); err != nil {
-			a.addLogInternal("error", fmt.Sprintf("Tray: switch to proxy mode failed: %v", err))
 		}
 	}
 	a.notifyFrontend()

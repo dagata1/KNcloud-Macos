@@ -2,12 +2,15 @@ package main
 
 // tunctl.go —— TUN 开关、换节点、换策略的编排（Go/gVisor 主路径 + 可选原生 badvpn）。
 //
-// 设计（对齐 SSTap）：
-//   - TUN 是一个「接管开关」，与分流策略（绕过大陆 / 全局 / SSTap 规则文件）组合使用；
-//   - 策略落在路由表上：默认路由进 TUN，「跳过」的网段（中国大陆 IP）写成物理网卡路由，
-//     国内流量根本不进隧道；Xray 用同一策略兜底处理进了 TUN 的流量（域名规则）；
+// 设计：
+//   - TUN 是四个互斥模式之一（绕过大陆 / 全局代理 / 全局直连 / TUN 模式），含义是「全局接管」：
+//     默认路由进 TUN，只有节点 /32、DNS 与私网走物理网卡；Xray 按 global 规则（私网直连，
+//     其余全走代理）处理，不与绕过大陆 / 规则文件组合；
+//   - TUN 不改写用户保存的分流策略 a.routingMode：关 TUN（或在 TUN 下点其它三个模式之一）
+//     后按该策略回到系统代理模式；
+//   - TUN 运行期间暂停 Windows 系统代理（整机流量已由虚拟网卡接管），关 TUN 时恢复；
 //   - 所有路由变化都是「期望表 vs 记账表」的差量（tunroutes.go），先加后删；
-//   - 换节点只动节点 /32 与出站，分流路由、DNS 劫持、IPv6 防泄漏全程不动。
+//   - 换节点只动节点 /32 与出站，其余路由、DNS 劫持、IPv6 防泄漏全程不动。
 
 import (
 	"errors"
@@ -20,6 +23,9 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+// tunPolicy TUN 的路由/分流策略：固定为全局（TUN 模式 = 全局接管）。
+const tunPolicy = "global"
 
 func (a *App) tunRouteOps() routeOps {
 	if a.tunOps != nil {
@@ -162,10 +168,10 @@ func pickFreeLoopbackPort() int {
 
 // ------------------------- 对外开关 -------------------------
 
-// SimpleConnect 简易/仪表盘的 TUN 开关。
+// SimpleConnect 简易/仪表盘/托盘的 TUN 开关。
 //
-// TUN 与分流策略组合生效：绕过大陆（大陆网段走物理网卡，不进隧道）、全局、
-// SSTap 规则文件。策略为「全局直连」时开 TUN 没有意义，临时改为全局并在关闭时恢复。
+// 开：以全局策略接管整机流量（与用户保存的分流策略无关，也不改写它）；
+// 关：回到系统代理模式，按用户保存的分流策略运行。
 func (a *App) SimpleConnect(start bool) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -196,11 +202,7 @@ func (a *App) tunStartLocked() error {
 	t0 := time.Now()
 
 	// 0) 预校验：策略可用、节点可解析、物理出口存在 —— 失败时什么都没动。
-	policy := a.routingMode
-	forced := false
-	if policy == "direct" || policy == "" {
-		policy, forced = "global", true
-	}
+	policy := tunPolicy
 	if _, err := tunPolicyShapeFor(policy); err != nil {
 		return err
 	}
@@ -244,12 +246,7 @@ func (a *App) tunStartLocked() error {
 	}
 
 	// 2) Xray 以 TUN 配置（出站绑物理网卡、无 mux、只嗅探 http/tls）启动/重启
-	prevMode := a.routingMode
-	if forced {
-		a.prevRoutingMode = prevMode
-		a.routingMode = policy
-		a.addLogInternal("info", fmt.Sprintf("TUN: policy %s → %s while TUN is on (restored when TUN stops)", prevMode, policy))
-	}
+	// tunEgressIface 非空时 buildCoreConfigJSON 固定按 global 生成规则，a.routingMode 不动
 	wasCore := a.coreRunning
 	a.tunEgressIface = ifc.Name
 	a.tunUDPPort = pickFreeLoopbackPort()
@@ -257,9 +254,6 @@ func (a *App) tunStartLocked() error {
 		a.addLogInternal("error", fmt.Sprintf("TUN: start core failed: %v", err))
 		a.tunEgressIface = ""
 		a.tunUDPPort = 0
-		if forced {
-			a.routingMode, a.prevRoutingMode = prevMode, ""
-		}
 		a.stopNativeTun()
 		a.coreRunning = false
 		if wasCore {
@@ -325,6 +319,7 @@ func (a *App) tunStartLocked() error {
 		}
 	}
 	a.tunRunning = true
+	a.suspendSystemProxyForTunLocked()
 	flushDnsClientCache()
 	engine := "gVisor (" + dev.Name() + ")"
 	if native {
@@ -348,10 +343,6 @@ func (a *App) tunSoftStopLocked() {
 	}
 	a.tunIfaceIdx = 0
 	a.tunRunning = false
-	if a.prevRoutingMode != "" {
-		a.routingMode = a.prevRoutingMode
-		a.prevRoutingMode = ""
-	}
 	if a.tunEgressIface != "" {
 		a.tunEgressIface = ""
 		a.tunUDPPort = 0
@@ -362,9 +353,48 @@ func (a *App) tunSoftStopLocked() {
 			}
 		}
 	}
+	a.resumeSystemProxyAfterTunLocked()
 	if wasRunning {
-		a.addLogInternal("info", "TUN stopped, all traffic back to direct (adapter kept installed)")
+		a.addLogInternal("info", fmt.Sprintf("TUN stopped, back to system-proxy mode with policy %s (adapter kept installed)", a.routingMode))
 	}
+}
+
+// suspendSystemProxyForTunLocked TUN 接管期间暂停 Windows 系统代理：整机流量已经进了
+// 虚拟网卡，再让浏览器走 127.0.0.1 HTTP 入站只是多一跳（且没有 UDP）。关 TUN 时恢复。
+func (a *App) suspendSystemProxyForTunLocked() {
+	if !a.systemProxy {
+		return
+	}
+	if err := setWindowsSystemProxy(false, ""); err != nil {
+		a.addLogInternal("warn", fmt.Sprintf("TUN: failed to pause Windows system proxy: %v", err))
+		return
+	}
+	a.systemProxy = false
+	a.tunPausedSysProxy = true
+	a.addLogInternal("info", "TUN: Windows system proxy paused while TUN is on")
+}
+
+// resumeSystemProxyAfterTunLocked 恢复被 TUN 暂停的系统代理（仅当内核仍在运行）。
+func (a *App) resumeSystemProxyAfterTunLocked() {
+	if !a.tunPausedSysProxy {
+		return
+	}
+	a.tunPausedSysProxy = false
+	if a.quitting {
+		return
+	}
+	if !a.coreRunning {
+		// 内核也停了（ToggleCore 停止）：只记下「系统代理应开启」，内核再启动时由 ToggleCore 写回
+		a.systemProxy = true
+		return
+	}
+	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
+	if err := setWindowsSystemProxy(true, server); err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Failed to restore Windows system proxy after TUN: %v", err))
+		return
+	}
+	a.systemProxy = true
+	a.addLogInternal("info", fmt.Sprintf("Windows system proxy restored -> %s", server))
 }
 
 // removeTapRouting 撤除 TUN 写入的全部路由与 DNS 劫持（网卡保留）。
@@ -479,7 +509,7 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", errNodeRejected, err)
 	}
-	desired, _, err := a.tunPlanLocked(hops, a.routingMode)
+	desired, _, err := a.tunPlanLocked(hops, tunPolicy)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errNodeRejected, err)
 	}
@@ -530,68 +560,6 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 	a.addLogInternal("info", fmt.Sprintf("TUN node switched in %s | %d node route(s) | split routes untouched | node: %s (%s:%d)",
 		time.Since(t0).Round(time.Millisecond), len(hops), node.Name, node.Address, node.Port))
 	return nil
-}
-
-// ------------------------- 换策略 -------------------------
-
-// tunSetPolicyLocked TUN 运行中切换分流策略：路由差量（先加后删）+ Xray 规则热替换。
-// 失败（规则文件不可用、路由写不进）时策略与路由保持原样。
-func (a *App) tunSetPolicyLocked(mode string) error {
-	node := a.activeNodeLocked()
-	if node == nil {
-		return fmt.Errorf("no node selected")
-	}
-	hops, err := tunNodeHops(*node, a.tunIfaceIdx)
-	if err != nil {
-		return err
-	}
-	desired, shape, err := a.tunPlanLocked(hops, mode)
-	if err != nil {
-		return err
-	}
-	ops := a.tunRouteOps()
-	before := map[routeKey]bool{}
-	for k := range a.tunRt.installed {
-		before[k] = true
-	}
-	t0 := time.Now()
-	added, err := a.tunRt.addMissing(ops, desired)
-	if err != nil {
-		var keep []routeEntry
-		for _, r := range a.tunRt.entries("") {
-			if before[r.routeKey] {
-				keep = append(keep, r)
-			}
-		}
-		a.tunRt.deleteStale(ops, keep)
-		return err
-	}
-	a.routingMode = mode
-	a.prevRoutingMode = ""
-	if a.coreRunning {
-		err := a.applyRoutingLocked()
-		if err != nil && errors.Is(err, errHotSwapUnavailable) {
-			err = a.startCoreLocked()
-		}
-		if err != nil {
-			a.coreRunning = false
-			a.addLogInternal("error", fmt.Sprintf("TUN: core failed after policy change, stopping TUN: %v", err))
-			a.tunSoftStopLocked()
-			return err
-		}
-	}
-	removed, derr := a.tunRt.deleteStale(ops, desired)
-	if shape.Defaults && !a.tunV6 && !a.nativeTunRunning() {
-		if addTunIPv6Route(a.tunIfaceIdx) == nil {
-			a.tunV6 = true
-		}
-	} else if !shape.Defaults && a.tunV6 {
-		removeTunIPv6RouteFast(a.tunIfaceIdx)
-		a.tunV6 = false
-	}
-	a.addLogInternal("info", fmt.Sprintf("TUN policy → %s in %s | +%d / -%d routes | %d bypass routes now",
-		mode, time.Since(t0).Round(time.Millisecond), added, removed, a.tunRt.count("bypass")))
-	return derr
 }
 
 // ------------------------- 残留清扫 -------------------------

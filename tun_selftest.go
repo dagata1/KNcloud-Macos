@@ -163,17 +163,8 @@ func runTunSelfTest(a *App) int {
 	}
 	a.mu.RUnlock()
 
-	a.mu.RLock()
-	bypassCN := a.routingMode == "bypass-cn"
-	a.mu.RUnlock()
-	if exitIP := fetchExitIP(); exitIP != nil && bypassCN {
-		if inCN(exitIP) {
-			fmt.Printf("[ OK ] bypass-cn: CN site exits directly (exit IP %s in CN ranges)\n", exitIP)
-		} else {
-			fmt.Printf("[FAIL] bypass-cn: CN site exit IP %s is outside CN ranges (went through proxy)\n", exitIP)
-			fail++
-		}
-	} else if exitIP != nil {
+	// TUN 模式固定全局接管：国内站点也必须经代理节点出去
+	if exitIP := fetchExitIP(); exitIP != nil {
 		switch {
 		case nodeIP != nil && exitIP.Equal(nodeIP):
 			fmt.Printf("[ OK ] CN site exits via proxy node (exit IP %s == node IP)\n", exitIP)

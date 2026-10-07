@@ -406,10 +406,3 @@ func TestSaveSettingsRejectedWhileTun(t *testing.T) {
 		t.Fatalf("dns change while TUN: err=%v dns=%s", err, a.settings.DnsServers)
 	}
 }
-
-func TestPersistedRoutingModeKeepsUserChoice(t *testing.T) {
-	a := &App{routingMode: "global", prevRoutingMode: "direct"}
-	if m := a.persistedRoutingMode(); m != "direct" {
-		t.Fatalf("persisted %s, want direct", m)
-	}
-}

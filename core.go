@@ -170,10 +170,14 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	if strings.HasPrefix(effectiveMode, "sstap:") {
 		effectiveMode = "global"
 	}
+	// TUN 模式 = 全局接管：不论用户保存的策略是什么，TUN 下一律按 global（私网直连、其余走代理）。
+	if a.tunEgressIface != "" {
+		effectiveMode = tunPolicy
+	}
 	switch effectiveMode {
 	case "global":
 		// 局域网必须直连：否则路由器 / 打印机 / NAS / 本地开发服务器全部不可达。
-		// 这条同时也是 TUN 模式的分流规则（TUN 开启时策略固定为 global）。
+		// 这条同时也是 TUN 模式的分流规则（TUN 下策略固定为 global，见上）。
 		rules = append(rules,
 			adsBlockRule(),
 			ruleObj{Type: "field", IP: []string{"geoip:private"}, OutboundTag: "direct"},
