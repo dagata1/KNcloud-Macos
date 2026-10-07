@@ -42,6 +42,9 @@ func (a *App) activeNodeLocked() *NodeItem {
 // 修好后的 gVisor 路径是默认引擎。
 func nativeTunPreferred() bool { return os.Getenv("KNCLOUD_NATIVE_TUN") == "1" }
 
+// tunDNSGuardEnabled WFP DNS 防泄漏拦截是否开启（默认关：拦截会让 NXDOMAIN 解析等约 11 秒）
+func tunDNSGuardEnabled() bool { return os.Getenv("KNCLOUD_TUN_DNS_GUARD") == "1" }
+
 // tunNodeHops 预校验并解析节点：节点 IPv4 + 每个 IP 的物理出口。任何一步失败都在
 // 拆除任何现网状态之前返回，调用方据此判定 errNodeRejected。
 func tunNodeHops(node NodeItem, tunIdx uint32) ([]hopRoute, error) {
@@ -288,13 +291,18 @@ func (a *App) tunStartLocked() error {
 			return fail(err)
 		}
 		a.tapDnsHijacked = true
-		// Windows 会并行去问所有网卡的 DNS（SMHNR），不拦就会拿到物理网卡上运营商的答案
-		v4, v6 := physDNSServers(phys.IfIndex)
-		if g, err := newTunDNSGuard(v4, v6); err != nil {
-			a.addLogInternal("warn", fmt.Sprintf("TUN: DNS leak guard not installed (physical DNS %v %v): %v", v4, v6, err))
-		} else if g != nil {
-			a.tunDNSGuard = g
-			a.addLogInternal("info", fmt.Sprintf("TUN: DNS leak guard on, blocking port 53 to physical DNS %v %v", v4, v6))
+		// Windows 会并行去问所有网卡的 DNS（SMHNR），TUN 网卡回 NXDOMAIN 时还会再去问物理网卡的
+		// 运营商 DNS。WFP 拦截能堵住这条旁路，但被拦的查询要等系统超时：每个 NXDOMAIN 解析
+		// 变成约 11 秒（实测）。在找到让 TUN DNS 成为唯一解析器的办法（NRPT）之前默认不开，
+		// KNCLOUD_TUN_DNS_GUARD=1 可手动开启。
+		if tunDNSGuardEnabled() {
+			v4, v6 := physDNSServers(phys.IfIndex)
+			if g, err := newTunDNSGuard(v4, v6); err != nil {
+				a.addLogInternal("warn", fmt.Sprintf("TUN: DNS leak guard not installed (physical DNS %v %v): %v", v4, v6, err))
+			} else if g != nil {
+				a.tunDNSGuard = g
+				a.addLogInternal("info", fmt.Sprintf("TUN: DNS leak guard on, blocking port 53 to physical DNS %v %v", v4, v6))
+			}
 		}
 	} else {
 		clearTapAdapterDNS(ifIdx)
