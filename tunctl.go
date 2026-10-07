@@ -96,12 +96,8 @@ func (a *App) startTapForwarding() error {
 	if a.tap != nil {
 		return nil
 	}
-	link := &tunLinkEndpoint{
-		mtu:     tapMTU,
-		adapter: knTap,
-		readEvt: knTap.readEvt,
-		stopCh:  make(chan struct{}),
-	}
+	dev := currentTunDevice()
+	link := dev.NewLink()
 	f, err := newTapForwarder(link, tapForwarderConfig{
 		SocksAddr:   fmt.Sprintf("127.0.0.1:%d", a.settings.SocksPort),
 		DNSAddr:     tunDnsAddr,
@@ -109,7 +105,7 @@ func (a *App) startTapForwarding() error {
 		BindIdx:     a.tunPhys.IfIndex,
 	})
 	if err != nil {
-		close(link.stopCh)
+		dev.StopLink(link, time.Second)
 		return err
 	}
 	a.tap = f
@@ -117,31 +113,15 @@ func (a *App) startTapForwarding() error {
 }
 
 // stopTapForwarding 停止协议栈与全部转发协程（网卡保留）。
-// 先停 readLoop（唤醒读事件，最多等 1s），再关闭全部连接并 Destroy 协议栈。
-// 读环与协议栈解耦后 readLoop 不再持锁投递，不会卡死。
+// 先停链路读协程（最多等 1s），再关闭全部连接并 Destroy 协议栈。
 func (a *App) stopTapForwarding() {
 	f := a.tap
 	if f == nil {
 		return
 	}
 	a.tap = nil
-	link, _ := f.linkEP.(*tunLinkEndpoint)
-	if link != nil {
-		select {
-		case <-link.stopCh:
-		default:
-			close(link.stopCh)
-		}
-		if knTap.readEvt != 0 {
-			_ = windows.SetEvent(knTap.readEvt)
-		}
-		done := make(chan struct{})
-		go func() { link.stopped.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			a.addLogInternal("warn", "TUN readLoop did not stop within 1s")
-		}
+	if !currentTunDevice().StopLink(f.linkEP, time.Second) {
+		a.addLogInternal("warn", "TUN readLoop did not stop within 1s")
 	}
 	if !f.stop(2 * time.Second) {
 		a.addLogInternal("warn", "TUN forwarder goroutines still draining after 2s")
@@ -192,7 +172,8 @@ func (a *App) tunStartLocked() error {
 	if _, err := tunPolicyShapeFor(policy); err != nil {
 		return err
 	}
-	staleIdx := knTap.ifIdx
+	dev := currentTunDevice()
+	staleIdx := dev.CachedIfIdx()
 	hops, err := tunNodeHops(*node, staleIdx)
 	if err != nil {
 		a.addLogInternal("error", "TUN: "+err.Error())
@@ -219,12 +200,12 @@ func (a *App) tunStartLocked() error {
 		}
 	}
 	if !native {
-		ifIdx, err = knTap.ensure()
+		ifIdx, err = dev.Open()
 		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("TUN: adapter error: %v", err))
 			return fmt.Errorf("adapter error: %v", err)
 		}
-		if err := configureTapAdapter(ifIdx); err != nil {
+		if err := dev.Configure(ifIdx); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("TUN: configure adapter failed: %v", err))
 			return err
 		}
@@ -298,7 +279,7 @@ func (a *App) tunStartLocked() error {
 	}
 	a.tunRunning = true
 	flushDnsClientCache()
-	engine := "gVisor (KNcloud-TAP)"
+	engine := "gVisor (" + dev.Name() + ")"
 	if native {
 		engine = "native tun2socks (SSTAP 1)"
 	}
