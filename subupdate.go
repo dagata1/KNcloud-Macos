@@ -74,6 +74,7 @@ func (a *App) runAutoSubUpdate() {
 		a.traySubUpdating.Store(false)
 		tray.requestRebuild()
 	}()
+	a.weeklyResolveDomain(time.Now()) // 每周最多查询一次最新官网地址
 	_, err := a.RefreshAccount()
 	if err == nil {
 		err = a.SyncNodes()

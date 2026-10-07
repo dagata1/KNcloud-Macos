@@ -1,6 +1,7 @@
 package main
 
 import (
+	"time"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,5 +47,18 @@ func TestFetchDynamicDomainFallback(t *testing.T) {
 	}
 	if d := fetchDynamicDomain(""); d != kncloudDefaultDomain {
 		t.Fatalf("default got %s", d)
+	}
+}
+
+func TestDomainCheckDue(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	if !domainCheckDue(now, 0) {
+		t.Fatal("never checked should be due")
+	}
+	if domainCheckDue(now, now.Add(-6*24*time.Hour).Unix()) {
+		t.Fatal("6 days should not be due")
+	}
+	if !domainCheckDue(now, now.Add(-7*24*time.Hour).Unix()) {
+		t.Fatal("7 days should be due")
 	}
 }

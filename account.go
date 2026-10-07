@@ -33,6 +33,9 @@ type AccountInfo struct {
 	// 持久化由 persistedConfig.AccountSubURL 单独加密存取（见 config.go）。
 	SubURL string `json:"-"`
 	SubID  string `json:"subId"` // 关联的订阅 ID
+	// DomainCheckedAt 上次向域名接口查询官网地址的时间（Unix 秒）。
+	// 查询只在每周一次的自动更新订阅时进行，频繁请求容易导致域名被墙。
+	DomainCheckedAt int64 `json:"domainCheckedAt,omitempty"`
 }
 
 func defaultAccount() AccountInfo {
@@ -58,7 +61,7 @@ func (a *App) SkipLogin() AccountInfo {
 func (a *App) Logout() AccountInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.account = AccountInfo{Domain: firstNonEmpty(a.account.Domain, kncloudDefaultDomain)}
+	a.account = AccountInfo{Domain: firstNonEmpty(a.account.Domain, kncloudDefaultDomain), DomainCheckedAt: a.account.DomainCheckedAt}
 	a.savePersisted()
 	return a.account
 }
@@ -70,7 +73,12 @@ func (a *App) Login(email, password string) (AccountInfo, error) {
 		return a.GetAccount(), fmt.Errorf("please enter email and password")
 	}
 
-	domain := a.resolveDomain()
+	a.mu.RLock()
+	domain := a.account.Domain
+	a.mu.RUnlock()
+	if domain == "" {
+		domain = kncloudDefaultDomain
+	}
 
 	token, err := v2boardLogin(domain, email, password)
 	if err != nil {
@@ -97,6 +105,7 @@ func (a *App) completeLogin(domain, email, token string) (AccountInfo, error) {
 	// 写入账户并关联订阅
 	var subID string
 	a.mu.Lock()
+	checkedAt := a.account.DomainCheckedAt
 	a.account = AccountInfo{
 		LoggedIn:       true,
 		Skipped:        false,
@@ -127,6 +136,7 @@ func (a *App) completeLogin(domain, email, token string) (AccountInfo, error) {
 		})
 	}
 	a.account.SubID = subID
+	a.account.DomainCheckedAt = checkedAt
 	a.savePersisted()
 	a.mu.Unlock()
 
@@ -143,13 +153,6 @@ func (a *App) completeLogin(domain, email, token string) (AccountInfo, error) {
 // RefreshAccount 用登录凭证重新拉取套餐流量/到期信息；订阅地址变化时同步更新
 func (a *App) RefreshAccount() (AccountInfo, error) {
 	a.mu.RLock()
-	wasLoggedIn := a.account.LoggedIn
-	a.mu.RUnlock()
-	if wasLoggedIn {
-		a.resolveDomain() // 先查询最新官网地址，失败则沿用当前地址
-	}
-
-	a.mu.RLock()
 	loggedIn := a.account.LoggedIn
 	domain := a.account.Domain
 	token := a.account.AuthToken
@@ -165,7 +168,7 @@ func (a *App) RefreshAccount() (AccountInfo, error) {
 	if err != nil {
 		if err == errTokenInvalid {
 			a.mu.Lock()
-			a.account = AccountInfo{Domain: domain}
+			a.account = AccountInfo{Domain: domain, DomainCheckedAt: a.account.DomainCheckedAt}
 			a.savePersisted()
 			a.mu.Unlock()
 		}

@@ -71,20 +71,32 @@ func fetchDynamicDomain(fallback string) string {
 	return d
 }
 
-// resolveDomain 取当前账户域名作为回退，查询最新官网地址；地址变化时写回账户并保存。
-func (a *App) resolveDomain() string {
+// domainCheckInterval 查询官网地址的最短间隔：每周一次。
+const domainCheckInterval = 7 * 24 * time.Hour
+
+// domainCheckDue 是否到了每周查询官网地址的时间（纯函数，便于测试）。
+func domainCheckDue(now time.Time, last int64) bool {
+	return last <= 0 || now.Sub(time.Unix(last, 0)) >= domainCheckInterval
+}
+
+// weeklyResolveDomain 只在自动更新订阅时调用：距上次查询满一周才请求域名接口，
+// 其余时间一律使用已保存的官网地址（默认 www.kncloud.top）。
+// 无论查询成功与否都记录时间，失败也要等下周，避免频繁请求。
+func (a *App) weeklyResolveDomain(now time.Time) {
 	a.mu.RLock()
 	cur := a.account.Domain
+	last := a.account.DomainCheckedAt
 	a.mu.RUnlock()
-	d := fetchDynamicDomain(cur)
-	if !strings.EqualFold(d, cur) {
-		a.mu.Lock()
-		if strings.EqualFold(a.account.Domain, cur) {
-			log.Printf("[domain] 官网地址更新：%s -> %s", cur, d)
-			a.account.Domain = d
-			a.savePersisted()
-		}
-		a.mu.Unlock()
+	if !domainCheckDue(now, last) {
+		return
 	}
-	return d
+	d := fetchDynamicDomain(cur)
+	a.mu.Lock()
+	a.account.DomainCheckedAt = now.Unix()
+	if !strings.EqualFold(d, a.account.Domain) {
+		log.Printf("[domain] 官网地址更新：%s -> %s", a.account.Domain, d)
+		a.account.Domain = d
+	}
+	a.savePersisted()
+	a.mu.Unlock()
 }
