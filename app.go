@@ -136,7 +136,13 @@ type App struct {
 	tap             *tapForwarder     // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
 	nativeTunCmd    *exec.Cmd         // C/lwIP tun2socks helper, SSTap-compatible fast path
 	nativeTunDone   chan struct{}
-	tapDnsHijacked  bool // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
+	tapDnsHijacked  bool           // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
+	tunRt           *tunRouteState // TUN 写入系统的全部 IPv4 路由记账（差量同步，见 tunroutes.go）
+	tunOps          routeOps       // 路由操作实现；nil 表示 Windows IP Helper（单测注入 fake）
+	tunPhys         physHop        // TUN 开启时的默认物理出口（绕过网段用）
+	tunEgressIface  string         // TUN 开启时的物理网卡名：Xray 出站 sockopt.interface 绑定它；空表示 TUN 未接管
+	tunV6           bool           // 是否写过 2000::/3 防泄漏路由
+	prevRoutingMode string         // TUN 开启时被临时改写前的策略（全局直连 → 全局），关闭时恢复
 	tunSampleUp     int64
 	tunSampleDown   int64
 	account         AccountInfo
@@ -575,6 +581,13 @@ func (a *App) UpdateNode(node NodeItem) error {
 	// （原先这里只重铺路由，挂在旧参数上的连接会继续用旧出口。）
 	if old.Active && a.tunRunning {
 		if err := a.tunHardSwitchLocked(node); err != nil {
+			if errors.Is(err, errNodeRejected) {
+				// 新参数被拒绝：隧道与内核仍在旧参数上正常工作 —— 撤回这次编辑，
+				// 保证界面与实际出口一致，不软停 TUN。
+				a.nodes[idx] = old
+				a.addLogInternal("error", fmt.Sprintf("Node edit rejected in TUN mode, kept previous settings: %v", err))
+				return err
+			}
 			a.tunSoftStopLocked()
 			a.addLogInternal("error", fmt.Sprintf("Failed to apply node edit in TUN mode: %v", err))
 			a.savePersisted()
@@ -636,15 +649,28 @@ func (a *App) DeleteNodes(ids []string) error {
 				a.addLogInternal("warn", "Active node deleted, core stopped; select a node and start again")
 			}
 		} else if next != nil {
-			// TUN 在跑：内核是转发协程的出口，不能停在「TUN 开着但没内核」的状态
-			// （那会让所有流量静默失败）。这里把内核拉起并做完整切换。
-			a.coreRunning = true
-			if err := a.tunHardSwitchLocked(*next); err != nil {
+			// TUN 在跑：依次尝试剩余节点。被拒绝（errNodeRejected）的节点不影响隧道，
+			// 继续试下一个；只有真正拆坏了隧道或一个能用的都没有时才软停。
+			switched := false
+			var lastErr error
+			for i := range a.nodes {
+				cand := a.nodes[i]
+				a.setActiveNodeLocked(cand.ID)
+				err := a.tunHardSwitchLocked(cand)
+				if err == nil {
+					switched = true
+					a.addLogInternal("info", fmt.Sprintf("Active node deleted, switched to [%s] %s", cand.Protocol, cand.Name))
+					break
+				}
+				lastErr = err
+				a.addLogInternal("warn", fmt.Sprintf("Surviving node %s rejected in TUN mode: %v", cand.Name, err))
+				if !errors.Is(err, errNodeRejected) {
+					break
+				}
+			}
+			if !switched {
 				a.tunSoftStopLocked()
-				a.coreRunning = false
-				a.addLogInternal("error", fmt.Sprintf("Failed to switch TUN to a surviving node after deletion: %v", err))
-			} else {
-				a.addLogInternal("info", fmt.Sprintf("Active node deleted, switched to [%s] %s", next.Protocol, next.Name))
+				a.addLogInternal("error", fmt.Sprintf("Failed to switch TUN to a surviving node after deletion, TUN stopped: %v", lastErr))
 			}
 		} else {
 			// 一个节点都不剩，没有任何东西可以代理 —— 只能停。
@@ -813,12 +839,12 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 	}
 	if !start {
 		// 内核是 TUN 的代理大脑：停内核前先软停止 TUN（常驻网卡保留）
+		a.stopCoreLocked()
+		a.coreRunning = false
 		if a.tunRunning {
 			a.tunSoftStopLocked()
 			a.addLogInternal("warn", "TUN soft-stopped along with core")
 		}
-		a.stopCoreLocked()
-		a.coreRunning = false
 		a.lastUpSpeed = "0 B/s"
 		a.lastDownSpeed = "0 B/s"
 		a.addLogInternal("warn", "Core stopped, no longer forwarding traffic")
@@ -860,12 +886,23 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 	if !valid {
 		mode = "bypass-cn"
 	}
-	// TUN 运行中不允许改分流策略：TUN 模式自己持有「除局域网外全部走代理」
-	// 这套策略（见 SimpleConnect），此时改策略会与之自相矛盾。
-	// 必须在改动任何状态之前拒绝，否则会把被拒绝的策略写进配置。
+	// TUN 运行中：绕过大陆 / 全局 / 规则文件 —— 路由差量 + Xray 规则热替换，TUN 不断；
+	// 全局直连 —— TUN 没有意义，先关 TUN 再按直连处理。
 	if a.tunRunning {
-		a.addLogInternal("warn", "Routing policy change rejected while TUN is active; turn TUN off first")
-		return false, fmt.Errorf("分流策略在 TUN 模式下不可修改，请先关闭 TUN")
+		if mode != "direct" {
+			if err := a.tunSetPolicyLocked(mode); err != nil {
+				a.addLogInternal("error", fmt.Sprintf("Routing policy change in TUN mode failed: %v", err))
+				a.savePersisted()
+				tray.requestRebuild()
+				return false, err
+			}
+			a.savePersisted()
+			tray.requestRebuild()
+			return true, nil
+		}
+		a.prevRoutingMode = ""
+		a.tunSoftStopLocked()
+		a.addLogInternal("info", "TUN stopped: switching to direct mode")
 	}
 
 	a.routingMode = mode
@@ -1009,7 +1046,7 @@ func (a *App) refreshSubscription(id string) error {
 			a.nodes[0].Active = true
 			a.activeNodeID = a.nodes[0].ID
 		}
-		if a.coreRunning {
+		if a.coreRunning && !a.tunRunning {
 			if err := a.startCoreLocked(); err != nil {
 				a.addLogInternal("error", fmt.Sprintf("Failed to restart core after subscription update: %v", err))
 				a.coreRunning = false
@@ -1019,6 +1056,7 @@ func (a *App) refreshSubscription(id string) error {
 		}
 		// 活动节点被订阅替换 → 走完整切换：活动节点的服务器地址/凭据可能已变，
 		// 存量连接必须断开，否则出口 IP 仍停在旧节点上。
+		// （TUN 下不先重启内核：热切换出站即可，重启失败会让转发接到死掉的 SOCKS 上。）
 		if a.tunRunning {
 			var active NodeItem
 			foundActive := false
@@ -1030,8 +1068,12 @@ func (a *App) refreshSubscription(id string) error {
 			}
 			if foundActive {
 				if err := a.tunHardSwitchLocked(active); err != nil {
-					a.tunSoftStopLocked()
-					a.addLogInternal("error", fmt.Sprintf("Failed to apply subscription update in TUN mode: %v", err))
+					if errors.Is(err, errNodeRejected) {
+						a.addLogInternal("error", fmt.Sprintf("Refreshed node rejected in TUN mode, tunnel kept on the previous parameters: %v", err))
+					} else {
+						a.tunSoftStopLocked()
+						a.addLogInternal("error", fmt.Sprintf("Failed to apply subscription update in TUN mode: %v", err))
+					}
 				}
 			}
 		} else if a.coreRunning {
@@ -1109,6 +1151,13 @@ func (a *App) SaveSettings(settings AppSettings) error {
 			settings.UiMode = "classic"
 		}
 	}
+	if a.tunRunning && (old.SocksPort != settings.SocksPort || old.DnsServers != settings.DnsServers) {
+		// TUN 转发器连的是 SOCKS 端口、DNS 服务器 /32 防回环按 DNS 设置写入：
+		// 运行中改它们会让 TUN 静默断流。拒绝并保持原设置。
+		a.addLogInternal("warn", "SOCKS port / DNS servers cannot be changed while TUN is on")
+		return fmt.Errorf("TUN 运行中不能修改 SOCKS 端口或 DNS 服务器，请先关闭 TUN")
+	}
+
 	a.settings = settings
 	a.addLogInternal("info", "Preferences saved")
 
@@ -1136,6 +1185,10 @@ func (a *App) SaveSettings(settings AppSettings) error {
 		if err := a.startCoreLocked(); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core with new settings: %v", err))
 			a.coreRunning = false
+			if a.tunRunning {
+				// 内核没起来：TUN 留着就是黑洞，软停回直连
+				a.tunSoftStopLocked()
+			}
 		} else {
 			a.addLogInternal("info", "Core restarted with new port/params")
 		}
@@ -1191,6 +1244,7 @@ func (a *App) cleanup() {
 
 	a.mu.Lock()
 	a.stopCoreLocked()
+	a.coreRunning = false // 软停 TUN 时不要再把内核拉起来
 	// tapstack：停转发 + 撤路由；常驻网卡保留在系统里（与 SSTap 的 TAP 一致）
 	a.tunSoftStopLocked()
 	a.savePersisted()

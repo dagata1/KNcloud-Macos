@@ -467,11 +467,8 @@ export default function App() {
   };
 
   const handleRoutingChange = async (mode) => {
-    // 四个模式互斥：切到内核代理模式前先关闭 TUN，
-    // 否则后端会拒绝在 TUN 运行期间改策略。
-    if (status.tunnelMode) {
-      await handleToggleTun(false);
-    }
+    // TUN 是独立开关，与分流策略组合：TUN 开着时切「绕过大陆 / 全局」由后端在
+    // 路由表上热切换（TUN 不断）；切「全局直连」后端会先关闭 TUN。
     try {
       await SetRoutingMode(mode);
     } catch (e) {
@@ -1091,11 +1088,11 @@ export default function App() {
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                     {status.activeNodeName === '未选择节点'
                       ? '请在服务器节点列表中选择一个节点'
-                      : `${status.activeNodeProto}${status.tunnelMode ? ' · TUN 模式（局域网直连，其余走代理）' : ''}`}
+                      : `${status.activeNodeProto}${status.tunnelMode ? ` · TUN 模式（${status.routingMode === 'global' ? '全局' : status.routingMode === 'bypass-cn' ? '绕过大陆' : '规则分流'}）` : ''}`}
                   </p>
                 </div>
 
-                {/* 代理模式：前三个走内核代理，第四个 TUN 走虚拟网卡，四者互斥 */}
+                {/* 前三个是分流策略（单选），第四个 TUN 是接管开关，可与「绕过大陆 / 全局」组合 */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                     <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
@@ -1108,19 +1105,19 @@ export default function App() {
                         : null}
                     >
                       <button
-                        className={`segment-btn ${!status.tunnelMode && status.routingMode === 'bypass-cn' ? 'active' : ''}`}
+                        className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('bypass-cn')}
                       >
                         绕过大陆
                       </button>
                       <button
-                        className={`segment-btn ${!status.tunnelMode && status.routingMode === 'global' ? 'active' : ''}`}
+                        className={`segment-btn ${status.routingMode === 'global' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('global')}
                       >
                         全局代理
                       </button>
                       <button
-                        className={`segment-btn ${!status.tunnelMode && status.routingMode === 'direct' ? 'active' : ''}`}
+                        className={`segment-btn ${status.routingMode === 'direct' ? 'active' : ''}`}
                         onClick={() => handleRoutingChange('direct')}
                       >
                         全局直连
@@ -1128,7 +1125,7 @@ export default function App() {
                       <button
                         className={`segment-btn ${status.tunnelMode ? 'active' : ''}`}
                         onClick={() => handleToggleTun(!status.tunnelMode)}
-                        title="虚拟网卡接管全部流量（需管理员权限）"
+                        title="虚拟网卡接管整机流量，按左侧策略分流：绕过大陆时国内 IP 直接走本地网卡（需管理员权限）"
                       >
                         TUN 模式
                       </button>

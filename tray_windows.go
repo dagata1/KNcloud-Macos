@@ -159,7 +159,7 @@ func (t *trayController) buildMenu() {
 	statusText := "未连接"
 	switch {
 	case tunRunning:
-		statusText = "TUN 全局模式运行中"
+		statusText = "TUN 模式运行中"
 	case coreRunning:
 		statusText = "代理运行中"
 	}
@@ -182,7 +182,8 @@ func (t *trayController) buildMenu() {
 
 	// ---------- 分流模式 ----------
 	miRouting := systray.AddMenuItem("路由模式", "切换分流策略")
-	// 策略对 TUN 分流同样生效（sstap.go 规则引擎），TUN 运行时不再置灰
+	// TUN 运行时「绕过大陆 / 全局」直接在 TUN 上热切换（路由差量，不断 TUN）；
+	// 「全局直连」与 TUN 互斥，TUN 运行时置灰（关 TUN 走「模式选择 → 代理模式」）。
 	for _, m := range []struct{ id, label string }{
 		{"bypass-cn", "绕过大陆"},
 		{"global", "全局代理"},
@@ -190,6 +191,10 @@ func (t *trayController) buildMenu() {
 	} {
 		child := miRouting.AddSubMenuItemCheckbox(m.label, "", routingMode == m.id)
 		modeID := m.id
+		if tunRunning && modeID == "direct" {
+			child.Disable()
+			continue
+		}
 		child.Click(func() { go a.traySetRoutingMode(modeID) })
 	}
 

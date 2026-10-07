@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -10,8 +9,6 @@ import (
 	"strings"
 	"testing"
 )
-
-func ipToU32(ip net.IP) uint32 { return binary.BigEndian.Uint32(ip.To4()) }
 
 func TestRangeToCIDRs(t *testing.T) {
 	// 简单用例逐一验证

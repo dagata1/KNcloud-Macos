@@ -82,8 +82,11 @@ func (a *App) startNativeTun(node NodeItem) error {
 			a.nativeTunCmd = nil
 			a.nativeTunDone = nil
 			if a.tunRunning {
-				a.tunRunning = false
-				a.addLogInternal("warn", fmt.Sprintf("native SSTap tun2socks exited: %v", err))
+				// 引擎意外退出：路由还指向一张没人转发的网卡。完整软停（撤路由、恢复内核配置），
+				// 不能只把 tunRunning 置假 —— 那会留下几千条路由和错误的界面状态。
+				a.addLogInternal("warn", fmt.Sprintf("native SSTap tun2socks exited: %v; stopping TUN", err))
+				a.tunSoftStopLocked()
+				tray.requestRebuild()
 			}
 		}
 		a.mu.Unlock()

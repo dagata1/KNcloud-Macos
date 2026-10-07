@@ -117,13 +117,22 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		"enabled":      true,
 		"destOverride": []string{"http", "tls", "quic"},
 	}
+	// TUN 开启时 socks-in 承接整机流量：只嗅探 http/tls（QUIC 嗅探对首包要求高、
+	// 失败时还要等超时；TUN 下 QUIC 按 IP 规则走即可）
+	socksSniffing := sniffing
+	if a.tunEgressIface != "" {
+		socksSniffing = map[string]interface{}{
+			"enabled":      true,
+			"destOverride": []string{"http", "tls"},
+		}
+	}
 
 	inbounds := []map[string]interface{}{
 		{
 			"tag": "socks-in", "listen": listen, "port": a.settings.SocksPort,
 			"protocol": "socks",
 			"settings": map[string]interface{}{"auth": "noauth", "udp": true},
-			"sniffing": sniffing,
+			"sniffing": socksSniffing,
 		},
 		{
 			"tag": "http-in", "listen": listen, "port": a.settings.HttpPort,
@@ -133,14 +142,19 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		},
 	}
 
-	proxyOut, err := buildProxyOutbound(node, a.settings.MuxEnabled, a.bridgeAddr)
+	proxyOut, err := a.buildProxyOutboundLocked(node, a.bridgeAddr)
 	if err != nil {
 		return "", err
 	}
 
+	directOut := map[string]interface{}{"tag": "direct", "protocol": "freedom", "settings": map[string]interface{}{}}
+	if a.tunEgressIface != "" {
+		// TUN 开启：直连出站绑定物理网卡，私网/直连目标绝不被 TUN 默认路由吸回来形成回环
+		directOut["streamSettings"] = map[string]interface{}{"sockopt": map[string]interface{}{"interface": a.tunEgressIface}}
+	}
 	outbounds := []map[string]interface{}{
 		proxyOut,
-		{"tag": "direct", "protocol": "freedom", "settings": map[string]interface{}{}},
+		directOut,
 		{"tag": "block", "protocol": "blackhole", "settings": map[string]interface{}{}},
 	}
 
@@ -340,9 +354,39 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool, bridgeAddr string) (map[
 		return nil, fmt.Errorf("Xray core does not support %s", node.Protocol)
 	}
 
-	if muxEnabled && (node.Protocol == "VLESS" || node.Protocol == "VMess" || node.Protocol == "Trojan") {
+	if proxyUsesMux(node, muxEnabled) {
 		out["mux"] = map[string]interface{}{"enabled": true, "concurrency": 8}
 	}
+	return out, nil
+}
+
+// buildProxyOutboundLocked 按当前运行状态生成 proxy 出站（调用方需持有锁）。
+//
+// TUN 开启时（tunEgressIface 非空）：
+//   - 不开 mux：整机流量挤进 8 路复用连接会队头阻塞；
+//   - streamSettings.sockopt.interface 绑定物理网卡：到节点的连接不管解析出哪个 IP
+//     （CDN/多 A 记录/AAAA）都直接走物理网卡，不会被 TUN 默认路由吸回形成回环；
+//   - Shadowsocks 节点地址钉成预解析 IP（与防回环 /32 一致）：Xray 的 UDP 拨号不受
+//     sockopt.interface 约束，钉 IP 保证 UDP 也走 /32。SS 没有 SNI/Host，钉 IP 无副作用。
+//
+// AnyTLS 出站指向本机协议桥（回环），不绑网卡；桥自己已把节点钉成 /32 里的 IP。
+func (a *App) buildProxyOutboundLocked(node NodeItem, bridgeAddr string) (map[string]interface{}, error) {
+	tun := a.tunEgressIface != ""
+	if tun && node.Protocol == "Shadowsocks" && net.ParseIP(node.Address) == nil {
+		if ips := lookupNodeIPv4sCached(node.Address); len(ips) > 0 {
+			node.Address = ips[0].String()
+		}
+	}
+	out, err := buildProxyOutbound(node, a.settings.MuxEnabled && !tun, bridgeAddr)
+	if err != nil || !tun || needsSingBoxBridge(node.Protocol) {
+		return out, err
+	}
+	stream, _ := out["streamSettings"].(map[string]interface{})
+	if stream == nil {
+		stream = map[string]interface{}{}
+		out["streamSettings"] = stream
+	}
+	stream["sockopt"] = map[string]interface{}{"interface": a.tunEgressIface}
 	return out, nil
 }
 
@@ -663,7 +707,7 @@ func (a *App) prepareProxyOutboundLocked(node NodeItem) (*preparedOutbound, erro
 		bridgeAddr = bridge.addr
 	}
 
-	proxyOut, err := buildProxyOutbound(node, a.settings.MuxEnabled, bridgeAddr)
+	proxyOut, err := a.buildProxyOutboundLocked(node, bridgeAddr)
 	if err != nil {
 		p.discard()
 		return nil, err
@@ -773,7 +817,12 @@ func (a *App) hotSwapProxyOutboundLocked(node NodeItem) error {
 // ------------------------- 分流策略热切换 -------------------------
 
 // proxyUsesMux 与 buildProxyOutbound 的判断保持一致：该节点的 proxy 出站是否启用 mux。
+// 带 flow（XTLS Vision）的 VLESS 绝不叠 mux：Vision 要直接拼接内层 TLS，套 mux 后
+// 服务端会拒绝/断开连接。
 func proxyUsesMux(node NodeItem, muxEnabled bool) bool {
+	if node.Flow != "" {
+		return false
+	}
 	return muxEnabled && (node.Protocol == "VLESS" || node.Protocol == "VMess" || node.Protocol == "Trojan")
 }
 
@@ -815,7 +864,7 @@ func (a *App) applyRoutingLocked() error {
 	}
 	// mux 出站上的子连接不经系统拨号器，记账看不到；换一个同节点的新 handler
 	// 关掉旧 handler 释放其 mux 连接（与换节点同一套流程）。
-	if proxyUsesMux(*node, a.settings.MuxEnabled) {
+	if proxyUsesMux(*node, a.settings.MuxEnabled && a.tunEgressIface == "") {
 		if err := a.hotSwapProxyOutboundLocked(*node); err != nil {
 			return fmt.Errorf("%w: refresh proxy outbound: %v", errHotSwapUnavailable, err)
 		}

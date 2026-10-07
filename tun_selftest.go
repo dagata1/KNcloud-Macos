@@ -51,7 +51,7 @@ func runTunSelfTest(a *App) int {
 
 	a.mu.RLock()
 	idx := a.tunIfaceIdx
-	hostRouteN := len(a.tunHostRoutes)
+	hostRouteN := a.tunRt.count("host")
 	nativePath := a.nativeTunCmd != nil
 	a.mu.RUnlock()
 	fmt.Printf("[ OK ] tun iface index=%d, node host routes=%d\n", idx, hostRouteN)
@@ -212,7 +212,7 @@ func runTunSelfTest(a *App) int {
 		fmt.Printf("[ OK ] routes restored (%s via ifIdx=%d gw=%v)\n", probeIP, r2.IfIndex, dwordToIP(r2.NextHop))
 	}
 	a.mu.RLock()
-	singboxGone := a.tunCmd == nil && a.tunJob == 0 && a.tunIfaceIdx == 0 && len(a.tunHostRoutes) == 0 && len(a.tunSplitRoutes) == 0 && a.nativeTunCmd == nil
+	singboxGone := a.tunCmd == nil && a.tunJob == 0 && a.tunIfaceIdx == 0 && a.tunRt.count("") == 0 && a.nativeTunCmd == nil
 	a.mu.RUnlock()
 	if !singboxGone {
 		fmt.Printf("[FAIL] TUN state not fully cleaned\n")
