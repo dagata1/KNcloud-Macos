@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -74,6 +75,8 @@ type CoreStatus struct {
 	HttpPort        int    `json:"httpPort"`
 	TunRunning      bool   `json:"tunRunning"`
 	TunnelMode      bool   `json:"tunnelMode"`
+	// Busy 为 true 表示有耗时操作（开关 TUN、切换策略）正在进行，其余字段是操作前的快照
+	Busy bool `json:"busy"`
 }
 
 type LogItem struct {
@@ -111,8 +114,9 @@ type App struct {
 	systemProxy     bool
 	routingMode     string
 	activeNodeID    string
-	traffic         trafficMeter    // 经代理节点的流量统计（独立锁，见 traffic.go）
-	statsInst       statsInstHolder // 当前内核实例（采样协程无锁读取）
+	traffic         trafficMeter               // 经代理节点的流量统计（独立锁，见 traffic.go）
+	statsInst       statsInstHolder            // 当前内核实例（采样协程无锁读取）
+	statusCache     atomic.Pointer[CoreStatus] // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
 	xrayInst        *xcore.Instance
 	coreNodeID      string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
 	tunRunning      bool
@@ -751,11 +755,25 @@ func (a *App) PingAllNodes() []NodeItem {
 
 // ------------------------- Core & Proxy APIs -------------------------
 
+// GetCoreStatus 界面每秒轮询的状态。
+//
+// 开关 TUN、切换策略等操作会持有 a.mu 写锁数秒（netsh、路由、内核重启）；这期间
+// 轮询不排队等锁，直接返回上一次的状态快照（Busy=true），流量数字仍是实时的
+// （独立锁，见 traffic.go）。界面因此不会卡住，操作结束后的下一次轮询即为最新状态。
 func (a *App) GetCoreStatus() CoreStatus {
-	a.mu.RLock()
-	st := a.coreStatusLocked()
-	a.mu.RUnlock()
-	// 流量数字有独立的锁（见 traffic.go）
+	var st CoreStatus
+	if a.mu.TryRLock() {
+		st = a.coreStatusLocked()
+		a.mu.RUnlock()
+		a.statusCache.Store(&st)
+	} else if c := a.statusCache.Load(); c != nil {
+		st = *c
+		st.Busy = true
+	} else {
+		a.mu.RLock()
+		st = a.coreStatusLocked()
+		a.mu.RUnlock()
+	}
 	upSpeed, downSpeed, totalUp, totalDown := a.traffic.snapshot()
 	st.UpSpeed = formatSpeed(upSpeed)
 	st.DownSpeed = formatSpeed(downSpeed)
