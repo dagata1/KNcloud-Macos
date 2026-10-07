@@ -563,6 +563,31 @@ body {
   color: var(--text-primary);
 }
 
+.mode-card {
+  padding: 8px;
+}
+
+.mode-switch.mode-switch-full {
+  display: grid;
+  width: 100%;
+  padding: 4px;
+  gap: 4px;
+}
+
+.mode-switch.mode-switch-full .segment-indicator {
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc((100% - 8px - 3 * 4px) / 4);
+}
+
+.mode-switch.mode-switch-full .segment-btn {
+  padding: 0 12px;
+  min-height: 52px;
+  font-size: 15px;
+  justify-content: center;
+}
+
 .mode-switch.busy .segment-btn {
   cursor: progress;
 }
@@ -1331,22 +1356,22 @@ select.win11-input option {
 /* 约 6 列（仪表盘默认宽度）；3 行（18 个）以上在卡片内滚动 */
 .qp-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
-  grid-auto-rows: 52px;
-  gap: 8px;
-  max-height: calc(52px * 3 + 8px * 2);
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  grid-auto-rows: 78px;
+  gap: 10px;
+  max-height: calc(78px * 4 + 10px * 3 + 4px);
   overflow-y: auto;
-  padding-right: 2px;
+  padding: 2px 4px 2px 2px;
 }
 
 .qp-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 4px;
+  justify-content: space-between;
   min-width: 0;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
   background: var(--bg-card);
   color: var(--text-primary);
@@ -1354,12 +1379,18 @@ select.win11-input option {
   text-align: left;
   cursor: pointer;
   outline: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
 .qp-tile:hover {
   background: var(--bg-card-hover);
   border-color: var(--border-default);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.qp-tile:active {
+  transform: translateY(0);
 }
 
 .qp-tile:focus,
@@ -1377,19 +1408,64 @@ select.win11-input option {
   border-color: var(--accent);
   background: var(--accent-subtle);
   box-shadow: inset 0 0 0 1px var(--accent);
+  transform: none;
 }
 
 .qp-tile.switching {
   opacity: 0.7;
 }
 
+.qp-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.qp-region {
+  flex-shrink: 0;
+  width: 28px;
+  height: 20px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  background: rgba(128, 128, 128, 0.16);
+}
+
+.qp-tile.active .qp-region {
+  color: #fff;
+  background: var(--accent);
+}
+
+.dark-theme .qp-tile.active .qp-region {
+  color: #0b1a24;
+}
+
 .qp-name {
-  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
   font-weight: 600;
-  line-height: 16px;
+  line-height: 20px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.qp-chip {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 14px;
+  padding: 0 5px;
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-default);
 }
 
 .qp-meta {
@@ -1397,19 +1473,48 @@ select.win11-input option {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  line-height: 14px;
+  line-height: 16px;
 }
 
 .qp-delay {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
+.qp-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px;
+}
+
+.qp-bars i {
+  display: block;
+  width: 3px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.22;
+}
+
+.qp-bars i:nth-child(1) { height: 4px; }
+.qp-bars i:nth-child(2) { height: 6px; }
+.qp-bars i:nth-child(3) { height: 8px; }
+.qp-bars i:nth-child(4) { height: 11px; }
+.qp-bars i.on { opacity: 1; }
+
 .qp-current {
-  font-size: 10px;
-  line-height: 12px;
-  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  padding: 0 7px;
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
 }
 
 .qp-delay-good { color: #107c41; }

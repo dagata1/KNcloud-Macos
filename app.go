@@ -116,6 +116,7 @@ type App struct {
 	activeNodeID      string
 	traffic           trafficMeter               // 经代理节点的流量统计（独立锁，见 traffic.go）
 	statsInst         statsInstHolder            // 当前内核实例（采样协程无锁读取）
+	traySubUpdating   atomic.Bool                // 托盘「更新订阅」进行中
 	statusCache       atomic.Pointer[CoreStatus] // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
 	xrayInst          *xcore.Instance
 	coreNodeID        string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）

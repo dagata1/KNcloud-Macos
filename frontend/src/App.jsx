@@ -218,8 +218,13 @@ export default function App() {
     const off = EventsOn('kncloud:refresh', () => {
       refreshAllData();
     });
+    // 托盘等后端操作的结果提示
+    const offToast = EventsOn('kncloud:toast', (t) => {
+      if (t && t.msg) showToast(t.msg, t.type || 'info');
+    });
     return () => {
       if (typeof off === 'function') off();
+      if (typeof offToast === 'function') offToast();
     };
   }, []);
 
@@ -815,6 +820,24 @@ export default function App() {
   })();
   const tileDelayClass = (d) => d > 0 ? (d < 300 ? 'qp-delay-good' : d < 800 ? 'qp-delay-medium' : 'qp-delay-bad') : d === -2 ? 'qp-delay-bad' : 'qp-delay-none';
   const tileDelayText = (d) => d > 0 ? `${d} ms` : d === -2 ? '超时' : '未测';
+  // 节点卡片：从名称拆出地区代码与 IPv6 标记（Windows 不渲染国旗 emoji，用地区代码徽标代替）
+  const REGION_CODES = [
+    ['香港', 'HK'], ['台湾', 'TW'], ['澳门', 'MO'], ['日本', 'JP'], ['韩国', 'KR'], ['新加坡', 'SG'],
+    ['美国', 'US'], ['英国', 'UK'], ['德国', 'DE'], ['法国', 'FR'], ['荷兰', 'NL'], ['加拿大', 'CA'],
+    ['澳大利亚', 'AU'], ['俄罗斯', 'RU'], ['印度', 'IN'], ['马来西亚', 'MY'], ['泰国', 'TH'],
+    ['越南', 'VN'], ['菲律宾', 'PH'], ['土耳其', 'TR'], ['巴西', 'BR'], ['阿根廷', 'AR'], ['中国', 'CN'],
+  ];
+  const tileRegion = (name = '') => {
+    for (const [k, c] of REGION_CODES) if (name.includes(k)) return c;
+    const m = name.match(/\b([A-Z]{2})\b/);
+    return m ? m[1] : (name.trim()[0] || '?');
+  };
+  const tileSplitName = (name = '') => {
+    const v6 = /[\[(（【]\s*v6\s*[\])）】]|ipv6/i.test(name);
+    const clean = name.replace(/\s*[\[(（【]\s*v6\s*[\])）】]\s*/ig, ' ').trim() || name;
+    return { clean, v6 };
+  };
+  const tileBars = (d) => d > 0 ? (d < 150 ? 4 : d < 300 ? 3 : d < 600 ? 2 : 1) : 0;
 
   // 四选一的当前模式：点击后立即显示目标（乐观），否则按真实状态（TUN 优先于分流策略）
   const MODE_ORDER = ['bypass-cn', 'global', 'direct', 'tun'];
@@ -1173,43 +1196,17 @@ export default function App() {
               )}
 
 
-              {/* Top Hero Status Banner：连接状态 + 当前模式（节点名只在下方「推荐节点」里显示，不重复） */}
-              <div className="win11-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px', gap: '24px' }}>
-                <div style={{ minWidth: 0 }}>
-                  {(() => {
-                    const noNode = status.activeNodeName === '未选择节点';
-                    const proxied = !noNode && status.running && actualMode !== 'direct';
-                    const dot = noNode || !status.running ? '#8f8f8f' : proxied ? '#3fbf6f' : '#e5a50a';
-                    return (
-                      <>
-                        <h2 className="hero-state" style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                          <span className="hero-dot" style={{ background: dot, boxShadow: proxied ? `0 0 0 3px ${dot}33` : 'none' }} />
-                          {noNode ? '未选择节点' : !status.running ? '代理未运行' : heroInfo.title}
-                        </h2>
-                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                          {noNode
-                            ? '请在服务器节点列表中选择一个节点'
-                            : !status.running ? '内核已停止，流量不经过节点' : heroInfo.desc}
-                        </p>
-                      </>
-                    );
-                  })()}
-                </div>
-
-                {/* 四个模式互斥：前三个是系统代理模式下的分流策略，TUN 模式是虚拟网卡全局接管 */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flexShrink: 0 }}>
-                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                    代理模式
-                  </span>
+              {/* 代理模式：四个互斥按钮占满整行（状态由高亮按钮本身表达，不再单独展示） */}
+              <div className="win11-card mode-card">
                   <div
-                    className={`segmented-control mode-switch ${pendingMode ? 'busy' : ''}`}
+                    className={`segmented-control mode-switch mode-switch-full ${pendingMode ? 'busy' : ''}`}
                     role="radiogroup"
                     aria-busy={!!pendingMode}
                   >
                     <span
                       className="segment-indicator"
                       aria-hidden="true"
-                      style={{ transform: `translateX(calc(${modeIndex} * (100% + 2px)))` }}
+                      style={{ transform: `translateX(calc(${modeIndex} * (100% + 4px)))` }}
                     />
                     {[
                       { id: 'bypass-cn', label: '绕过大陆' },
@@ -1230,7 +1227,6 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                </div>
               </div>
 
               {/* 4 Metric Cards */}
@@ -1308,9 +1304,6 @@ export default function App() {
                     >
                       <RefreshCw size={13} className={pingInProgress ? 'spin' : ''} />
                     </button>
-                    <button className="win11-btn" onClick={() => setActiveTab('servers')}>
-                      管理节点 ({nodes.length})
-                    </button>
                   </div>
                 </div>
                 {nodes.length === 0 ? (
@@ -1325,11 +1318,28 @@ export default function App() {
                         onClick={() => handleSelectNode(node.id)}
                         title={`${node.name}\n${node.protocol} · ${node.address}:${node.port}`}
                       >
-                        <span className="qp-name">{node.name}</span>
-                        <span className="qp-meta">
-                          <span className={`qp-delay ${tileDelayClass(node.delay)}`}>{tileDelayText(node.delay)}</span>
-                          {node.active && <span className="node-current-tag qp-current">当前</span>}
-                        </span>
+                        {(() => {
+                          const { clean, v6 } = tileSplitName(node.name);
+                          const bars = tileBars(node.delay);
+                          return (
+                            <>
+                              <span className="qp-top">
+                                <span className="qp-region">{tileRegion(node.name)}</span>
+                                <span className="qp-name">{clean}</span>
+                                {v6 && <span className="qp-chip">IPv6</span>}
+                              </span>
+                              <span className="qp-meta">
+                                <span className={`qp-delay ${tileDelayClass(node.delay)}`}>
+                                  <span className="qp-bars" aria-hidden="true">
+                                    {[1, 2, 3, 4].map(i => <i key={i} className={i <= bars ? 'on' : ''} />)}
+                                  </span>
+                                  {tileDelayText(node.delay)}
+                                </span>
+                                {node.active && <span className="qp-current">当前</span>}
+                              </span>
+                            </>
+                          );
+                        })()}
                       </button>
                     ))}
                   </div>

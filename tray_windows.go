@@ -173,6 +173,19 @@ func (t *trayController) buildMenu() {
 	}
 	systray.SetTooltip(statusLabel)
 
+	// ---------- 更新订阅（与仪表盘「更新订阅」一致：刷新套餐/流量 + 同步节点） ----------
+	subLabel := "更新订阅"
+	if a.traySubUpdating.Load() {
+		subLabel = "正在更新订阅…"
+	}
+	miSub := systray.AddMenuItem(subLabel, "刷新套餐与流量，并同步最新节点列表")
+	if a.traySubUpdating.Load() {
+		miSub.Disable()
+	}
+	miSub.Click(func() { go a.trayUpdateSubscription() })
+
+	systray.AddSeparator()
+
 	// ---------- 代理模式（与仪表盘四个按钮一致，四选一互斥） ----------
 	// 绕过大陆 / 全局代理 / 全局直连 = 系统代理模式下的分流策略；TUN 模式 = 虚拟网卡全局接管。
 	// TUN 运行时只勾 TUN；点任一策略即关 TUN 并按该策略回到系统代理模式。
@@ -263,6 +276,36 @@ func (a *App) traySetRoutingMode(mode string) {
 	a.SetRoutingMode(mode)
 	a.notifyFrontend()
 	tray.requestRebuild()
+}
+
+// trayUpdateSubscription 托盘「更新订阅」：刷新账户信息并同步订阅节点，完成后通知界面刷新并弹出提示。
+// 同一时间只跑一次；进行中菜单项显示「正在更新订阅…」并置灰。
+func (a *App) trayUpdateSubscription() {
+	if !a.traySubUpdating.CompareAndSwap(false, true) {
+		return
+	}
+	tray.requestRebuild()
+	defer func() {
+		a.traySubUpdating.Store(false)
+		a.notifyFrontend()
+		tray.requestRebuild()
+	}()
+	_, err := a.RefreshAccount()
+	if err == nil {
+		err = a.SyncNodes()
+	}
+	ctx := a.appCtx()
+	if err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Tray: subscription update failed: %v", err))
+		if ctx != nil {
+			wailsruntime.EventsEmit(ctx, "kncloud:toast", map[string]string{"msg": "更新失败：" + err.Error(), "type": "error"})
+		}
+		return
+	}
+	a.addLogInternal("info", "Tray: subscription and nodes updated")
+	if ctx != nil {
+		wailsruntime.EventsEmit(ctx, "kncloud:toast", map[string]string{"msg": "订阅及节点已更新", "type": "success"})
+	}
 }
 
 // notifyFrontend 通知界面刷新（托盘操作可能改变了节点 / 模式 / 开关状态）。
