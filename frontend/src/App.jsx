@@ -120,6 +120,11 @@ export default function App() {
   
   // 简易模式自定义节点下拉是否展开
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
+  const nodeTriggerRef = useRef(null);
+  // 下拉收起后让触发按钮失焦：否则切出窗口再切回时 WebView2 会对仍持有焦点的按钮显示焦点环
+  useEffect(() => {
+    if (!nodeMenuOpen && nodeTriggerRef.current) nodeTriggerRef.current.blur();
+  }, [nodeMenuOpen]);
   const [selectedProto, setSelectedProto] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedNodeIds, setSelectedNodeIds] = useState([]); // 节点列表多选（Ctrl+A / Ctrl+点击 / Shift+点击）
@@ -164,8 +169,10 @@ export default function App() {
   const [loginBusy, setLoginBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [webLoginWaiting, setWebLoginWaiting] = useState(false); // 网页授权登录等待中
-  const [tunBusy, setTunBusy] = useState(false); // TUN 模式切换进行中
-  const [tunPending, setTunPending] = useState(null); // 'on'/'off'：点击后的即时反馈，完成前显示进行中文案
+  // 仪表盘四个模式按钮（绕过大陆 / 全局代理 / 全局直连 / TUN 模式，四选一）：
+  // pendingMode 是点击后的乐观高亮，后端完成（开关 TUN 可能要数秒）后清空、回落到真实状态
+  const [pendingMode, setPendingMode] = useState(null);
+  const modeBusyRef = useRef(false);
 
   const fmtGB = (b) => {
     if (!b || b <= 0) return '0 GB';
@@ -298,7 +305,9 @@ export default function App() {
   // 简易模式：一键切换分流策略（内核与系统代理由程序启动逻辑自动开启，按钮不再启停 TUN）
   //   点击连接 = 绕过大陆（海外走代理、大陆直连）；点击断开 = 全局直连
   const handleSimpleConnect = async () => {
-    const next = status.routingMode === 'bypass-cn' ? 'direct' : 'bypass-cn';
+    // TUN 运行中也算「已连接」：断开 = 关 TUN 并切到全局直连
+    const connected = status.tunnelMode || status.routingMode === 'bypass-cn';
+    const next = connected ? 'direct' : 'bypass-cn';
     // 连接动作一发出就进入「正在连接…」，检测结果由下面的自动检测更新
     setSimpleNet(next === 'bypass-cn' ? 'checking' : 'idle');
     try {
@@ -439,44 +448,45 @@ export default function App() {
   const simpleActiveId = nodes.find(n => n.active)?.id;
   useEffect(() => {
     if (uiMode !== 'simple') return;
-    if ((status.routingMode || 'bypass-cn') === 'direct') {
+    if (!status.tunnelMode && (status.routingMode || 'bypass-cn') === 'direct') {
       setSimpleNet('idle');
       return;
     }
     checkSimpleNode();
-  }, [uiMode, status.routingMode, simpleActiveId]);
+  }, [uiMode, status.routingMode, status.tunnelMode, simpleActiveId]);
 
-  // TUN 模式开关（虚拟网卡接管全部流量，与内核代理互斥；后端会自动停/恢复内核与系统代理）
-  // SimpleConnect 是同步完成整套启停的（数秒），先立即切换开关并显示进行中文案，完成后落到真实状态
-  const handleToggleTun = async (on) => {
-    if (tunBusy) return;
-    setTunBusy(true);
-    setTunPending(on ? 'on' : 'off');
+  // 四个模式互斥：TUN = 虚拟网卡全局接管；其余三个是系统代理模式下的分流策略。
+  // TUN 运行中点其它三个之一，后端先关 TUN 再按所点策略回到系统代理模式。
+  // 点击即乐观高亮（滑块立刻移动），后端耗时操作不阻塞界面；完成后以真实状态为准。
+  const handleModeSelect = async (mode) => {
+    const current = status.tunnelMode ? 'tun' : (status.routingMode || 'bypass-cn');
+    if (modeBusyRef.current || mode === current) return;
+    modeBusyRef.current = true;
+    setPendingMode(mode);
+    const enteringTun = mode === 'tun';
+    const leavingTun = status.tunnelMode && !enteringTun;
+    if (enteringTun || leavingTun) showToast(enteringTun ? '正在启动 TUN…' : '正在关闭 TUN…', 'info');
+    let ok = false;
     try {
-      await SimpleConnect(on);
+      if (enteringTun) await SimpleConnect(true);
+      else await SetRoutingMode(mode);
+      ok = true;
     } catch (e) {
-      showToast(String(e?.message || e).replace(/^.*?: /, ''), 'error');
+      const msg = String(e?.message || e).replace(/^.*?: /, '');
+      showToast(enteringTun ? msg : '切换模式失败：' + msg, 'error');
     } finally {
       try {
         const s = await GetCoreStatus();
         setStatus(s);
+        if (ok && (enteringTun || leavingTun)) showToast(s.tunnelMode ? 'TUN 已开启' : 'TUN 已关闭', 'success');
       } catch (_) {}
-      setTunPending(null);
-      setTunBusy(false);
+      setPendingMode(null);
+      modeBusyRef.current = false;
     }
   };
 
-  const handleRoutingChange = async (mode) => {
-    // TUN 是独立开关，与分流策略组合：TUN 开着时切「绕过大陆 / 全局」由后端在
-    // 路由表上热切换（TUN 不断）；切「全局直连」后端会先关闭 TUN。
-    try {
-      await SetRoutingMode(mode);
-    } catch (e) {
-      showToast('切换分流策略失败，内核可能已停止：' + String(e?.message || e).replace(/^.*?: /, ''), 'error');
-    }
-    const updated = await GetCoreStatus();
-    setStatus(updated);
-  };
+  // 路由页「全局路由模式」卡片与仪表盘按钮共用同一套互斥逻辑
+  const handleRoutingChange = (mode) => handleModeSelect(mode);
 
   const handleSelectNode = async (id) => {
     const target = nodes.find(n => n.id === id);
@@ -729,11 +739,31 @@ export default function App() {
   const filteredNodes = nodes;
 
   // 仪表盘推荐节点：按真连接延迟排序（已测速升序 → 超时 → 未测速垫底），取前 3 个
-  const quickPickNodes = [...nodes].sort((a, b) => {
+  // 当前节点一定在其中（仪表盘只在这里显示当前节点，顶部状态栏不再重复节点名）
+  const quickPickSorted = [...nodes].sort((a, b) => {
     const rank = (d) => (d > 0 ? 0 : d === -2 ? 1 : 2);
     if (rank(a.delay) !== rank(b.delay)) return rank(a.delay) - rank(b.delay);
     return rank(a.delay) === 0 ? a.delay - b.delay : 0;
   });
+  const quickPickNodes = (() => {
+    const top = quickPickSorted.slice(0, 3);
+    const cur = nodes.find(n => n.active);
+    if (cur && !top.some(n => n.id === cur.id)) return [cur, ...top.slice(0, 2)];
+    return top;
+  })();
+
+  // 四选一的当前模式：点击后立即显示目标（乐观），否则按真实状态（TUN 优先于分流策略）
+  const MODE_ORDER = ['bypass-cn', 'global', 'direct', 'tun'];
+  const actualMode = status.tunnelMode ? 'tun' : (status.routingMode || 'bypass-cn');
+  const shownMode = pendingMode || actualMode;
+  const modeIndex = Math.max(0, MODE_ORDER.indexOf(shownMode));
+  const MODE_INFO = {
+    'bypass-cn': { title: '绕过大陆', desc: '系统代理 · 国内网站直连，其余经节点转发' },
+    global: { title: '全局代理', desc: '系统代理 · 全部流量经节点转发（局域网除外）' },
+    direct: { title: '全局直连', desc: '系统代理 · 全部直连，不经过节点' },
+    tun: { title: 'TUN 全局接管', desc: '虚拟网卡接管整机流量，全部经节点转发（局域网除外）' },
+  };
+  const heroInfo = MODE_INFO[actualMode] || { title: '自定义规则', desc: '系统代理 · 按 SSTap 规则文件分流' };
 
   // 登录页与简洁模式同尺寸（420x640）；登录成功后由模式切换逻辑控制窗口
   useEffect(() => {
@@ -787,9 +817,9 @@ export default function App() {
   // ---------------- 简易模式（点击即用，无复杂设置） ----------------
   if (uiMode === 'simple') {
     const activeNode = nodes.find(n => n.active);
-    // 简易模式的状态完全由分流策略决定（不再依赖 TUN 是否运行）
+    // 简易模式：绕过大陆或 TUN（普通模式里开启的）都算已连接
     const routing = status.routingMode || 'bypass-cn';
-    const simpleOn = routing === 'bypass-cn';
+    const simpleOn = status.tunnelMode || routing === 'bypass-cn';
     return (
       <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
         <header className="titlebar drag-region">
@@ -854,7 +884,7 @@ export default function App() {
 
           <div className="simple-node-area" style={{ position: 'relative' }}>
             <label>代理节点</label>
-            <button type="button" className="simple-node-trigger" onClick={() => setNodeMenuOpen(o => !o)}>
+            <button type="button" ref={nodeTriggerRef} className="simple-node-trigger" onClick={() => setNodeMenuOpen(o => !o)}>
               {activeNode ? (
                 <>
                   <span className={`proto-badge proto-${activeNode.protocol.toLowerCase()}`}>{activeNode.protocol}</span>
@@ -1079,63 +1109,62 @@ export default function App() {
               )}
 
 
-              {/* Top Hero Status Banner：仅展示当前连接节点 + 策略/TUN 控制 */}
-              <div className="win11-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px' }}>
-                <div>
-                  <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    {status.activeNodeName === '未选择节点' ? '未选择节点' : `当前节点：${status.activeNodeName}`}
-                  </h2>
-                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                    {status.activeNodeName === '未选择节点'
-                      ? '请在服务器节点列表中选择一个节点'
-                      : `${status.activeNodeProto}${status.tunnelMode ? ` · TUN 模式（${status.routingMode === 'global' ? '全局' : status.routingMode === 'bypass-cn' ? '绕过大陆' : '规则分流'}）` : ''}`}
-                  </p>
+              {/* Top Hero Status Banner：连接状态 + 当前模式（节点名只在下方「推荐节点」里显示，不重复） */}
+              <div className="win11-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px', gap: '24px' }}>
+                <div style={{ minWidth: 0 }}>
+                  {(() => {
+                    const noNode = status.activeNodeName === '未选择节点';
+                    const proxied = !noNode && status.running && actualMode !== 'direct';
+                    const dot = noNode || !status.running ? '#8f8f8f' : proxied ? '#3fbf6f' : '#e5a50a';
+                    return (
+                      <>
+                        <h2 className="hero-state" style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                          <span className="hero-dot" style={{ background: dot, boxShadow: proxied ? `0 0 0 3px ${dot}33` : 'none' }} />
+                          {noNode ? '未选择节点' : !status.running ? '代理未运行' : heroInfo.title}
+                        </h2>
+                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                          {noNode
+                            ? '请在服务器节点列表中选择一个节点'
+                            : !status.running ? '内核已停止，流量不经过节点' : heroInfo.desc}
+                        </p>
+                      </>
+                    );
+                  })()}
                 </div>
 
-                {/* 前三个是分流策略（单选），第四个 TUN 是接管开关，可与「绕过大陆 / 全局」组合 */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                      代理模式
-                    </span>
-                    <div
-                      className="segmented-control"
-                      style={tunBusy || !!tunPending
-                        ? { opacity: 0.45, pointerEvents: 'none' }
-                        : null}
-                    >
+                {/* 四个模式互斥：前三个是系统代理模式下的分流策略，TUN 模式是虚拟网卡全局接管 */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flexShrink: 0 }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    代理模式
+                  </span>
+                  <div
+                    className={`segmented-control mode-switch ${pendingMode ? 'busy' : ''}`}
+                    role="radiogroup"
+                    aria-busy={!!pendingMode}
+                  >
+                    <span
+                      className="segment-indicator"
+                      aria-hidden="true"
+                      style={{ transform: `translateX(calc(${modeIndex} * (100% + 2px)))` }}
+                    />
+                    {[
+                      { id: 'bypass-cn', label: '绕过大陆' },
+                      { id: 'global', label: '全局代理' },
+                      { id: 'direct', label: '全局直连' },
+                      { id: 'tun', label: 'TUN 模式', title: '虚拟网卡全局接管整机流量（需管理员权限）' },
+                    ].map(m => (
                       <button
-                        className={`segment-btn ${status.routingMode === 'bypass-cn' ? 'active' : ''}`}
-                        onClick={() => handleRoutingChange('bypass-cn')}
+                        key={m.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={shownMode === m.id}
+                        className={`segment-btn ${shownMode === m.id ? 'active' : ''}`}
+                        onClick={() => handleModeSelect(m.id)}
+                        title={m.title}
                       >
-                        绕过大陆
+                        {m.label}
                       </button>
-                      <button
-                        className={`segment-btn ${status.routingMode === 'global' ? 'active' : ''}`}
-                        onClick={() => handleRoutingChange('global')}
-                      >
-                        全局代理
-                      </button>
-                      <button
-                        className={`segment-btn ${status.routingMode === 'direct' ? 'active' : ''}`}
-                        onClick={() => handleRoutingChange('direct')}
-                      >
-                        全局直连
-                      </button>
-                      <button
-                        className={`segment-btn ${status.tunnelMode ? 'active' : ''}`}
-                        onClick={() => handleToggleTun(!status.tunnelMode)}
-                        title="虚拟网卡接管整机流量，按左侧策略分流：绕过大陆时国内 IP 直接走本地网卡（需管理员权限）"
-                      >
-                        TUN 模式
-                      </button>
-                    </div>
-                    {/* 仅在 TUN 启停过程中给出进度提示，其余时间不留冗余说明文字 */}
-                    {tunPending && (
-                      <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                        {tunPending === 'on' ? '正在启动 TUN…' : '正在关闭 TUN…'}
-                      </span>
-                    )}
+                    ))}
                   </div>
                 </div>
               </div>
@@ -1170,14 +1199,14 @@ export default function App() {
 
                 <div className="win11-card">
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '12px' }}>
-                    <span>Windows 系统代理</span>
-                    <Radio size={16} color={status.systemProxy ? '#107c41' : '#888'} />
+                    <span>{status.tunnelMode ? '流量接管' : 'Windows 系统代理'}</span>
+                    <Radio size={16} color={status.tunnelMode || status.systemProxy ? '#107c41' : '#888'} />
                   </div>
-                  <div style={{ fontSize: '17px', fontWeight: 600, marginTop: '10px', color: status.systemProxy ? 'var(--accent)' : 'var(--text-secondary)' }}>
-                    {status.systemProxy ? '已接管 (127.0.0.1)' : '未接管 (直连)'}
+                  <div style={{ fontSize: '17px', fontWeight: 600, marginTop: '10px', color: status.tunnelMode || status.systemProxy ? 'var(--accent)' : 'var(--text-secondary)' }}>
+                    {status.tunnelMode ? 'TUN 接管' : status.systemProxy ? '已接管 (127.0.0.1)' : '未接管 (直连)'}
                   </div>
                   <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
-                    端口: 127.0.0.1:{settings.httpPort}
+                    {status.tunnelMode ? '系统代理未启用（关闭 TUN 后恢复）' : <>                    端口: 127.0.0.1:{settings.httpPort}</>}
                   </div>
                 </div>
 
@@ -1221,7 +1250,10 @@ export default function App() {
                       }}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                          <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
+                          {node.active && <span className="node-current-tag">当前节点</span>}
+                        </span>
                         {(node.delay > 0 || node.delay === -2) && (
                           <span className={`latency-pill ${node.delay > 0 && node.delay < 300 ? 'latency-good' : node.delay < 800 ? 'latency-medium' : 'latency-none'}`}>
                             <Zap size={12} /> {node.delay > 0 ? `${node.delay} ms` : '超时'}
@@ -1467,8 +1499,8 @@ export default function App() {
                       padding: '16px',
                       borderRadius: '8px',
                       cursor: 'pointer',
-                      border: status.routingMode === 'bypass-cn' ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
-                      background: status.routingMode === 'bypass-cn' ? 'var(--accent-subtle)' : 'var(--bg-card)'
+                      border: shownMode === 'bypass-cn' ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
+                      background: shownMode === 'bypass-cn' ? 'var(--accent-subtle)' : 'var(--bg-card)'
                     }}
                   >
                     <h4 style={{ fontSize: '13px', fontWeight: 600 }}>绕过大陆 (GFWList)</h4>
@@ -1483,8 +1515,8 @@ export default function App() {
                       padding: '16px',
                       borderRadius: '8px',
                       cursor: 'pointer',
-                      border: status.routingMode === 'global' ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
-                      background: status.routingMode === 'global' ? 'var(--accent-subtle)' : 'var(--bg-card)'
+                      border: shownMode === 'global' ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
+                      background: shownMode === 'global' ? 'var(--accent-subtle)' : 'var(--bg-card)'
                     }}
                   >
                     <h4 style={{ fontSize: '13px', fontWeight: 600 }}>全局代理 (Global)</h4>
@@ -1499,8 +1531,8 @@ export default function App() {
                       padding: '16px',
                       borderRadius: '8px',
                       cursor: 'pointer',
-                      border: status.routingMode === 'direct' ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
-                      background: status.routingMode === 'direct' ? 'var(--accent-subtle)' : 'var(--bg-card)'
+                      border: shownMode === 'direct' ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
+                      background: shownMode === 'direct' ? 'var(--accent-subtle)' : 'var(--bg-card)'
                     }}
                   >
                     <h4 style={{ fontSize: '13px', fontWeight: 600 }}>全局直连 (Direct)</h4>

@@ -491,7 +491,7 @@ body {
   border-radius: var(--radius-sm);
   cursor: pointer;
   outline: none;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease;
   min-height: 48px;
   display: inline-flex;
   align-items: center;
@@ -513,6 +513,98 @@ body {
   color: var(--text-primary);
   font-weight: 600;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* 仪表盘模式切换：等宽四格 + 滑动高亮块。
+   高亮由 .segment-indicator 承担（transform 过渡，不触发重排），按钮本身不换背景、
+   不换字重，点击时没有布局抖动；忙碌时只有高亮块轻微呼吸，不整体变暗。 */
+.mode-switch {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  isolation: isolate;
+}
+
+.mode-switch .segment-indicator {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px - 3 * 2px) / 4);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-hover);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), inset 0 0 0 1px var(--border-subtle);
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.mode-switch .segment-indicator::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 16px;
+  height: 3px;
+  margin-left: -8px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.mode-switch .segment-btn {
+  padding: 13px 26px;
+  font-weight: 600;
+}
+
+.mode-switch .segment-btn.active {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-primary);
+}
+
+.mode-switch.busy .segment-btn {
+  cursor: progress;
+}
+
+.mode-switch.busy .segment-indicator {
+  animation: seg-busy 1.1s ease-in-out infinite;
+}
+
+@keyframes seg-busy {
+  0%, 100% { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), inset 0 0 0 1px var(--border-subtle); }
+  50% { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), inset 0 0 0 1px var(--accent-border); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-switch .segment-indicator { transition: none; }
+  .mode-switch.busy .segment-indicator { animation: none; }
+}
+
+/* 仪表盘顶部状态：状态圆点 */
+.hero-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hero-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* 推荐节点卡片上的「当前节点」标记 */
+.node-current-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border);
 }
 
 /* Protocol Badges */
@@ -1151,4 +1243,32 @@ select.win11-input option {
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
   }
+}
+
+/* 自定义按钮不显示浏览器默认焦点环：按钮点击后仍持有焦点，切出窗口再切回时
+   WebView2 会把它当作键盘焦点画出 :focus-visible 的深色描边。 */
+.theme-toggle-btn:focus,
+.theme-toggle-btn:focus-visible,
+.win-caption-btn:focus,
+.win-caption-btn:focus-visible,
+.hamburger-btn:focus,
+.hamburger-btn:focus-visible,
+.nav-item-btn:focus,
+.nav-item-btn:focus-visible,
+.win11-btn:focus,
+.win11-btn:focus-visible,
+.login-btn:focus,
+.login-btn:focus-visible,
+.simple-power-btn:focus,
+.simple-power-btn:focus-visible,
+.simple-node-trigger:focus,
+.simple-node-trigger:focus-visible,
+.simple-node-item:focus,
+.simple-node-item:focus-visible {
+  outline: none;
+}
+
+/* 键盘焦点用主题色边框代替描边 */
+.simple-node-trigger:focus-visible {
+  border-color: var(--accent);
 }
