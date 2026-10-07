@@ -1583,8 +1583,8 @@ select.win11-input option {
 }
 
 /* ---------- 订阅卡：左半账户/流量/操作，右半实时速率 ---------- */
-.acct { padding: 0; overflow: hidden; display: grid; grid-template-columns: 1fr 1fr; }
-.acct-left { padding: 18px 20px 12px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.acct-split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.acct-left { padding: 18px 20px 12px; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .acct-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .acct-email {
   font-size: 15px; font-weight: 600; color: var(--text-primary);
@@ -1604,8 +1604,7 @@ select.win11-input option {
 .acct-actions { display: flex; align-items: center; gap: 2px; margin-left: -10px; }
 .acct-right {
   display: grid; grid-template-columns: 1fr 1fr;
-  border-left: 1px solid var(--border-subtle);
-  background: rgba(127, 127, 127, 0.04);
+  padding: 0; overflow: hidden;
 }
 .acct-stat { padding: 18px 20px; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 .acct-stat + .acct-stat { border-left: 1px solid var(--border-subtle); }

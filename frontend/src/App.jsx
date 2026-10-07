@@ -1176,8 +1176,8 @@ export default function App() {
               </div>
 
               {account && account.loggedIn && (
-                <div className="win11-card account-card acct">
-                  <div className="acct-left">
+                <div className="acct-split">
+                  <div className="win11-card account-card acct-left">
                     <div className="acct-id">
                       <span className="acct-email">{account.email}</span>
                       <span className="acct-plan">{account.planName || 'KNcloud 会员'}</span>
@@ -1218,7 +1218,7 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-                  <div className="acct-right" title="仅统计经代理节点的流量">
+                  <div className="win11-card acct-right" title="仅统计经代理节点的流量">
                     <div className="acct-stat">
                       <div className="acct-label"><ArrowUpRight size={14} className="acct-up" />上传</div>
                       <div className="acct-speed">{status.upSpeed}</div>
