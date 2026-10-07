@@ -3,11 +3,16 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
+
+// errUnsupportedProtocol 可识别但本版本不支持的协议（如 AnyTLS）：批量导入/订阅时跳过并记日志。
+var errUnsupportedProtocol = errors.New("unsupported protocol")
 
 // ParseShareLink 将单条分享链接解析为节点；无法识别时返回错误。
 func ParseShareLink(link string) (NodeItem, error) {
@@ -28,7 +33,8 @@ func ParseShareLink(link string) (NodeItem, error) {
 	case strings.HasPrefix(lower, "hysteria2://"), strings.HasPrefix(lower, "hy2://"):
 		return parseUserHostLink(link, "Hysteria2")
 	case strings.HasPrefix(lower, "anytls://"):
-		return parseUserHostLink(link, "AnyTLS")
+		// AnyTLS 需要 sing-box 协议桥（Xray 没有该出站），已随 sing-box 一并移除
+		return NodeItem{}, fmt.Errorf("%w: AnyTLS is not supported in this version", errUnsupportedProtocol)
 	default:
 		return NodeItem{}, fmt.Errorf("unrecognized protocol")
 	}
@@ -116,16 +122,6 @@ func parseUserHostLink(link, proto string) (NodeItem, error) {
 	if proto == "Hysteria2" {
 		security = "tls"
 		network = "udp"
-	}
-	// AnyTLS 本身就是 TLS over TCP，缺省补齐；type 只保留 tcp，
-	// 别的协议字段（path/host/serviceName 等）对它没有意义
-	if proto == "AnyTLS" {
-		if security == "" || security == "none" {
-			security = "tls"
-		}
-		if network != "tcp" {
-			network = "tcp"
-		}
 	}
 	methodPass := ""
 	if proto == "Shadowsocks" {
@@ -238,6 +234,13 @@ func parseShadowsocksLink(link string) (NodeItem, error) {
 
 // ParseShareLinks 批量解析（支持整段 base64 订阅内容或按行分隔的链接）
 func ParseShareLinks(content string) []NodeItem {
+	nodes, _ := ParseShareLinksReport(content)
+	return nodes
+}
+
+// ParseShareLinksReport 同 ParseShareLinks，另返回因协议不受支持而跳过的条数（按协议名计）。
+func ParseShareLinksReport(content string) ([]NodeItem, map[string]int) {
+	skipped := map[string]int{}
 	content = strings.TrimSpace(content)
 	var lines []string
 	if !strings.Contains(content, "://") {
@@ -256,6 +259,9 @@ func ParseShareLinks(content string) []NodeItem {
 	for _, l := range lines {
 		n, err := ParseShareLink(l)
 		if err != nil {
+			if errors.Is(err, errUnsupportedProtocol) {
+				skipped[strings.ToLower(strings.SplitN(l, "://", 2)[0])]++
+			}
 			continue
 		}
 		// 过滤机场订阅里的“流量信息 / 套餐到期”等伪装成节点的条目
@@ -264,7 +270,20 @@ func ParseShareLinks(content string) []NodeItem {
 		}
 		nodes = append(nodes, n)
 	}
-	return nodes
+	return nodes, skipped
+}
+
+// skippedLinksLog 把跳过统计写成一行日志文案；没有跳过返回空串。
+func skippedLinksLog(skipped map[string]int) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	var parts []string
+	for proto, n := range skipped {
+		parts = append(parts, fmt.Sprintf("%d %s", n, proto))
+	}
+	sort.Strings(parts)
+	return "Skipped unsupported link(s): " + strings.Join(parts, ", ") + " (AnyTLS is not supported in this version)"
 }
 
 // BuildShareLink 将节点转换回标准分享链接（ParseShareLink 的逆操作），用于复制到剪贴板。
@@ -293,7 +312,7 @@ func BuildShareLink(n NodeItem) (string, error) {
 			return "", err
 		}
 		return "vmess://" + base64.RawURLEncoding.EncodeToString(data), nil
-	case "VLESS", "Trojan", "Hysteria2", "AnyTLS":
+	case "VLESS", "Trojan", "Hysteria2":
 		q := url.Values{}
 		if n.Security != "" && n.Security != "none" {
 			q.Set("security", n.Security)

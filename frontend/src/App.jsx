@@ -1640,7 +1640,6 @@ export default function App() {
                     onChange={e => setLocalSettings({ ...settings, coreType: e.target.value })}
                   >
                     <option value="Xray-core">Xray-core (推荐，协议支持全)</option>
-                    <option value="Sing-box">sing-box (高性能现代核心)</option>
                     <option value="V2Ray-core">V2Ray-core (传统稳定版)</option>
                   </select>
                 </div>
@@ -1745,7 +1744,6 @@ export default function App() {
                   <option value="VMess">VMess</option>
                   <option value="Trojan">Trojan</option>
                   <option value="Hysteria2">Hysteria2</option>
-                  <option value="AnyTLS">AnyTLS</option>
                   <option value="Shadowsocks">Shadowsocks</option>
                 </select>
               </div>
@@ -1813,7 +1811,7 @@ export default function App() {
           <div className="win11-dialog" onClick={e => e.stopPropagation()}>
             <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>批量导入分享链接</h2>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '4px 0 10px' }}>
-              每行一条，支持 vmess:// vless:// trojan:// ss:// hysteria2:// anytls:// 链接，或直接粘贴 Base64 订阅内容。
+              每行一条，支持 vmess:// vless:// trojan:// ss:// hysteria2:// 链接（AnyTLS 暂不支持，会被跳过），或直接粘贴 Base64 订阅内容。
             </p>
             <div className="form-group">
               <textarea

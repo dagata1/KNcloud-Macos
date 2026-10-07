@@ -308,3 +308,22 @@ func (a *App) persistedRoutingMode() string {
 	}
 	return a.routingMode
 }
+
+// removeLegacySingBoxFiles 清理旧版本释放到配置目录的 sing-box 相关文件
+// （sing-box.exe、TUN/AnyTLS 桥配置与日志、geosite-cn.srs）。本版本已不再使用 sing-box。
+func removeLegacySingBoxFiles() int {
+	dir, err := appConfigDir()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, pat := range []string{"sing-box.exe", "sing-box-tun.json", "sing-box-run.log", "geosite-cn.srs", "sing-box-anytls-*.json", "sing-box-anytls-*.log"} {
+		matches, _ := filepath.Glob(filepath.Join(dir, pat))
+		for _, m := range matches {
+			if os.Remove(m) == nil {
+				n++
+			}
+		}
+	}
+	return n
+}

@@ -144,7 +144,10 @@ func (a *App) ImportNodesFromClipboard() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	nodes := ParseShareLinks(text)
+	nodes, skipped := ParseShareLinksReport(text)
+	if msg := skippedLinksLog(skipped); msg != "" {
+		a.addLogInternal("warn", msg)
+	}
 	if len(nodes) == 0 {
 		return 0, nil
 	}

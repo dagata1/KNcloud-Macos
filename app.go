@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/windows"
-
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	xcore "github.com/xtls/xray-core/core"
 )
@@ -22,7 +20,7 @@ import (
 type NodeItem struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks, Hysteria2, AnyTLS
+	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks（Hysteria2 仅解析，Xray 不支持）
 	Address  string `json:"address"`
 	Port     int    `json:"port"`
 	UUID     string `json:"uuid"`
@@ -120,21 +118,11 @@ type App struct {
 	lastUpSample    int64
 	lastDownSample  int64
 	xrayInst        *xcore.Instance
-	coreNodeID      string        // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
-	bridge          *anyTLSBridge // AnyTLS 协议桥（Xray 无 AnyTLS 出站，见 anytls.go）
-	bridgeAddr      string        // 桥的本地 SOCKS 地址，生成 Xray 出站时用
-	tunCmd          *exec.Cmd
+	coreNodeID      string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
 	tunRunning      bool
 	tunIfaceIdx     uint32
-	tunJob          windows.Handle    // sing-box 所在 KILL_ON_JOB_CLOSE Job
-	tunProcDone     chan struct{}     // sing-box 进程退出信号
-	tunHostRoutes   []mibIPForwardRow // 写入物理网卡的节点 /32 直连路由（断开时回收）
-	tunSplitRoutes  []splitRouteEntry // 写入 TUN 网卡的分流路由（按添加记录删除；断开网卡上的路由对旧版 IP Helper 枚举不可见，不能靠枚举清理）
-	tunReplacedCore bool              // TUN 启动时是否停掉了正在运行的内核（断开 TUN 时据此恢复常规代理）
-	tunWarm         bool              // sing-box 与虚拟网卡热待机（TUN 软停止后保留，重开秒级生效）
-	tunWarmNode     NodeItem          // 热待机中 sing-box 出站使用的节点（变更后需冷启动重建）
-	tap             *tapForwarder     // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
-	nativeTunCmd    *exec.Cmd         // C/lwIP tun2socks helper, SSTap-compatible fast path
+	tap             *tapForwarder // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
+	nativeTunCmd    *exec.Cmd     // C/lwIP tun2socks helper, SSTap-compatible fast path
 	nativeTunDone   chan struct{}
 	tapDnsHijacked  bool           // 是否给 TUN 网卡设置过劫持 DNS（停止时需复位）
 	tunRt           *tunRouteState // TUN 写入系统的全部 IPv4 路由记账（差量同步，见 tunroutes.go）
@@ -212,6 +200,9 @@ func NewApp() *App {
 		}
 		app.addLogInternal("info", fmt.Sprintf("Removed %d built-in sample node(s) left by a previous version", removedSamples))
 		app.savePersisted()
+	}
+	if n := removeLegacySingBoxFiles(); n > 0 {
+		app.addLogInternal("info", fmt.Sprintf("Removed %d legacy sing-box file(s) from the config directory", n))
 	}
 	app.addLogInternal("info", fmt.Sprintf("Core component Xray-core %s loaded", xrayCoreVersion()))
 	return app
@@ -528,9 +519,12 @@ func (a *App) AddNode(node NodeItem) error {
 }
 
 func (a *App) ImportNodesFromLinks(links string) (int, error) {
-	nodes := ParseShareLinks(links)
+	nodes, skipped := ParseShareLinksReport(links)
+	if msg := skippedLinksLog(skipped); msg != "" {
+		a.addLogInternal("warn", msg)
+	}
 	if len(nodes) == 0 {
-		return 0, fmt.Errorf("no valid share links found (supported: vmess/vless/trojan/ss/hysteria2/anytls)")
+		return 0, fmt.Errorf("no valid share links found (supported: vmess/vless/trojan/ss)")
 	}
 
 	a.mu.Lock()
@@ -974,7 +968,10 @@ func (a *App) refreshSubscription(id string) error {
 		return err
 	}
 
-	nodes := ParseShareLinks(content)
+	nodes, skipped := ParseShareLinksReport(content)
+	if msg := skippedLinksLog(skipped); msg != "" {
+		a.addLogInternal("warn", fmt.Sprintf("Subscription [%s]: %s", subName, msg))
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 

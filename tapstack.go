@@ -1,12 +1,9 @@
 package main
 
-// tunstack.go —— SSTap 核心方案的 Go 重写。
+// tapstack.go —— SSTap 核心方案的 Go 重写（wintun 网卡 + 链路端点 + SOCKS5 客户端）。
 //
 // SSTap 快的原因：TAP-Windows 虚拟网卡（固定 GUID）驱动装一次就永久常驻，
 // 开关全局代理只是增删路由表条目，从不创建/销毁网卡。
-//
-// KNcloud 原方案（sing-box）每次开关都「杀进程 → pnputil 删残留设备 → 等待
-// 网卡消失 → 重建网卡」，慢在网卡生命周期管理。
 //
 // 本文件用 Go 原地重写 SSTap 的三层核心：
 //  1. 常驻虚拟网卡：直接调用 wintun.dll（已内嵌）以固定 GUID 创建适配器，
@@ -626,7 +623,7 @@ func addrToNetIP(a tcpip.Address) net.IP {
 }
 
 // bindToIfaceControl 返回把 socket 绑定到指定网卡的 ListenConfig Control
-// （IP_UNICAST_IF，网络字节序的接口索引 —— sing-box bind_interface 同款手段）
+// （IP_UNICAST_IF，网络字节序的接口索引）
 func bindToIfaceControl(ifIdx uint32) func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, c syscall.RawConn) error {
 		return c.Control(func(fd uintptr) {

@@ -348,9 +348,6 @@ func (a *App) removeTapRouting() {
 			a.addLogInternal("warn", fmt.Sprintf("%d TUN routes could not be removed, will retry", failed))
 		}
 	}
-	// 旧版记账（sing-box 遗留路径）
-	removeHostRoutes(&a.tunHostRoutes)
-	a.dropSplitRoutesFast()
 	idx := a.tunIfaceIdx
 	if idx == 0 {
 		return
@@ -365,19 +362,6 @@ func (a *App) removeTapRouting() {
 	a.tapDnsHijacked = false
 	removeTunIPv6RouteFast(idx)
 	a.tunV6 = false
-}
-
-// dropSplitRoutesFast 按旧版记账逐条删除分流路由，返回 (已删除条数, 记账条数)
-func (a *App) dropSplitRoutesFast() (removed, want int) {
-	want = len(a.tunSplitRoutes)
-	for _, r := range a.tunSplitRoutes {
-		row := mibIPForwardRow{Dest: r.Dest, Mask: r.Mask, NextHop: r.NextHop, IfIndex: r.IfIndex}
-		if deleteRouteRow(&row) == nil {
-			removed++
-		}
-	}
-	a.tunSplitRoutes = nil
-	return removed, want
 }
 
 // setTapAdapterDNS 网卡 DNS 指向劫持地址（netsh 写错参数时退出码仍为 0，必须回读校验）。
@@ -477,10 +461,8 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 			return fmt.Errorf("%w: %v", errNodeRejected, err)
 		}
 	}
-	committed := false
 	deps := tunSwitchDeps{
 		commitOutbound: func() error {
-			committed = true
 			err := errHotSwapUnavailable
 			if prepared != nil {
 				err = a.commitProxyOutboundLocked(prepared)
@@ -509,9 +491,6 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 		flushDNS: flushDnsClientCache,
 	}
 	err = runTunNodeSwitch(a.tunRt, a.tunRouteOps(), desired, deps)
-	if !committed && prepared != nil {
-		prepared.discard()
-	}
 	if err != nil {
 		return err
 	}

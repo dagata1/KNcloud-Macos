@@ -3,7 +3,7 @@ package main
 // KNcloud-WIN.exe --tun-selftest：简易模式（SSTap 方案）链路自检，需管理员运行。
 //
 // 流程：连接 → 校验虚拟网卡/DNS 劫持路由/分流路由 → 经劫持 DNS 解析海外域名
-// （内部走 sing-box DNS 分流 + 代理查询）→ 直拨海外 IP:443（流量被分流路由吸进
+// （DNS 劫持 198.18.0.2 → 转发器 DNS 中继）→ 直拨海外 IP:443（流量被分流路由吸进
 // TUN，能通即证明代理链路工作）→ 断开 → 校验网卡/路由/进程清理回滚。
 // 仅用于验证，不影响正常 UI 使用。
 
@@ -114,7 +114,7 @@ func runTunSelfTest(a *App) int {
 		}
 	}
 
-	// 2) DNS 劫持链路：系统解析器 → 劫持 DNS → sing-box 分流 → 代理查询
+	// 2) DNS 劫持链路：系统解析器 → 198.18.0.2 → 转发器 DNS 中继 → 223.5.5.5
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	ips, derr := net.DefaultResolver.LookupIPAddr(ctx, "www.google.com")
 	cancel()
@@ -124,7 +124,7 @@ func runTunSelfTest(a *App) int {
 	} else {
 		fmt.Printf("[ OK ] hijacked DNS resolved www.google.com -> %v\n", ips)
 
-		// 3) 海外 TCP：直拨 google IP:443，流量经分流路由进 TUN → sing-box → 代理
+		// 3) 海外 TCP：直拨 google IP:443，流量经分流路由进 TUN → gVisor → Xray → 代理
 		target := (&net.TCPAddr{IP: ips[0].IP, Port: 443}).String()
 		d := net.Dialer{Timeout: 10 * time.Second}
 		conn, terr := d.Dial("tcp", target)
@@ -137,12 +137,9 @@ func runTunSelfTest(a *App) int {
 		}
 	}
 
-	// 4) TUN 模式分流语义校验。
-	//    TUN 开启后策略固定为「除局域网外全部走代理」，所以要验两件事：
-	//      a) 国内站点也必须从代理节点出站 —— 用国内 IP 查询服务反查出口 IP；
+	// 4) TUN 分流语义校验（看真实出口 IP）：
+	//      a) 全局：国内站点也从代理节点出站；绕过大陆：国内站点直连（出口 IP 在 CN 网段）；
 	//      b) 局域网必须直连 —— 物理网关仍可直达。
-	//    旧版这里只查路由表就打印「Xray rules send it direct」，从不观察实际出站，
-	//    属于恒真的假断言；这里改为校验真实出口 IP。
 	cnSet := parseCIDRList(cnRoutesTxt)
 	inCN := func(ip net.IP) bool {
 		for _, n := range cnSet {
@@ -166,7 +163,17 @@ func runTunSelfTest(a *App) int {
 	}
 	a.mu.RUnlock()
 
-	if exitIP := fetchExitIP(); exitIP != nil {
+	a.mu.RLock()
+	bypassCN := a.routingMode == "bypass-cn"
+	a.mu.RUnlock()
+	if exitIP := fetchExitIP(); exitIP != nil && bypassCN {
+		if inCN(exitIP) {
+			fmt.Printf("[ OK ] bypass-cn: CN site exits directly (exit IP %s in CN ranges)\n", exitIP)
+		} else {
+			fmt.Printf("[FAIL] bypass-cn: CN site exit IP %s is outside CN ranges (went through proxy)\n", exitIP)
+			fail++
+		}
+	} else if exitIP != nil {
 		switch {
 		case nodeIP != nil && exitIP.Equal(nodeIP):
 			fmt.Printf("[ OK ] CN site exits via proxy node (exit IP %s == node IP)\n", exitIP)
@@ -212,9 +219,9 @@ func runTunSelfTest(a *App) int {
 		fmt.Printf("[ OK ] routes restored (%s via ifIdx=%d gw=%v)\n", probeIP, r2.IfIndex, dwordToIP(r2.NextHop))
 	}
 	a.mu.RLock()
-	singboxGone := a.tunCmd == nil && a.tunJob == 0 && a.tunIfaceIdx == 0 && a.tunRt.count("") == 0 && a.nativeTunCmd == nil
+	cleaned := a.tap == nil && a.tunIfaceIdx == 0 && a.tunRt.count("") == 0 && a.nativeTunCmd == nil
 	a.mu.RUnlock()
-	if !singboxGone {
+	if !cleaned {
 		fmt.Printf("[FAIL] TUN state not fully cleaned\n")
 		fail++
 	} else {
