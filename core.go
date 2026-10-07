@@ -462,16 +462,48 @@ func (a *App) stopCoreLocked() {
 	a.coreNodeID = ""
 }
 
-// testNodeRealDelay 真连接测速：为该节点临时启动一个独立 Xray 实例（随机端口 SOCKS 入站），
-// 通过该节点的真实代理链路请求测速 URL（完整 DNS+TCP+TLS+HTTP），返回毫秒；失败返回 -2。
-func testNodeRealDelay(node NodeItem) int {
-	// 与 v2rayN 默认的真连接延迟测速地址一致，保证数值可比
-	const testURL = "https://www.google.com/generate_204"
-
+// realDelayTestConfig 生成测速用临时 Xray 实例的配置：SOCKS 入站（port）→ 该节点 proxy 出站。
+//
+// egressIface 非空（TUN 正在接管整机流量）时，proxy 出站 sockopt.interface 绑定物理网卡，
+// 与主内核同一做法：到被测节点的连接直接走物理网卡，不会被 TUN 默认路由吸进隧道、
+// 套着当前节点出去（那样测出的是「当前节点 + 被测节点」的叠加延迟，还占用当前节点流量）。
+// 测速只走 TCP（SOCKS 入站关 UDP），sockopt.interface 对 TCP 拨号生效。
+func realDelayTestConfig(node NodeItem, port int, egressIface string) (map[string]interface{}, error) {
 	proxyOut, err := buildProxyOutbound(node, false)
 	if err != nil {
-		return -2
+		return nil, err
 	}
+	if egressIface != "" {
+		stream, _ := proxyOut["streamSettings"].(map[string]interface{})
+		if stream == nil {
+			stream = map[string]interface{}{}
+			proxyOut["streamSettings"] = stream
+		}
+		stream["sockopt"] = map[string]interface{}{"interface": egressIface}
+	}
+	return map[string]interface{}{
+		"inbounds": []map[string]interface{}{{
+			"tag": "test-in", "listen": "127.0.0.1", "port": port,
+			"protocol": "socks",
+			"settings": map[string]interface{}{"auth": "noauth", "udp": false},
+		}},
+		"outbounds": []map[string]interface{}{proxyOut},
+		"routing": map[string]interface{}{
+			"domainStrategy": "AsIs",
+			"rules": []map[string]interface{}{
+				{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
+			},
+		},
+	}, nil
+}
+
+// testNodeRealDelay 真连接测速：为该节点临时启动一个独立 Xray 实例（随机端口 SOCKS 入站），
+// 通过该节点的真实代理链路请求测速 URL（完整 DNS+TCP+TLS+HTTP），返回毫秒；失败返回 -2。
+// 临时实例与主内核完全独立，不改动现网出站、系统代理或 TUN 路由。
+// egressIface 见 realDelayTestConfig（TUN 开启时传物理网卡名，否则传空）。
+func testNodeRealDelay(node NodeItem, egressIface string) int {
+	// 与 v2rayN 默认的真连接延迟测速地址一致，保证数值可比
+	const testURL = "https://www.google.com/generate_204"
 
 	// 找一个空闲端口给临时实例的 SOCKS 入站
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -481,22 +513,9 @@ func testNodeRealDelay(node NodeItem) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	cfg := map[string]interface{}{
-		"inbounds": []map[string]interface{}{{
-			"tag": "test-in", "listen": "127.0.0.1", "port": port,
-			"protocol": "socks",
-			"settings": map[string]interface{}{"auth": "noauth", "udp": false},
-		}},
-		"outbounds": []map[string]interface{}{
-			proxyOut,
-			{"tag": "direct", "protocol": "freedom", "settings": map[string]interface{}{}},
-		},
-		"routing": map[string]interface{}{
-			"domainStrategy": "AsIs",
-			"rules": []map[string]interface{}{
-				{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
-			},
-		},
+	cfg, err := realDelayTestConfig(node, port, egressIface)
+	if err != nil {
+		return -2
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {

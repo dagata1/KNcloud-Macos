@@ -30,6 +30,8 @@ export function ImportNodesFromClipboard():Promise<number>;
 
 export function ImportNodesFromLinks(arg1:string):Promise<number>;
 
+export function IsAutoPinging():Promise<boolean>;
+
 export function IsWindowMaximized():Promise<boolean>;
 
 export function Login(arg1:string,arg2:string):Promise<main.AccountInfo>;
@@ -53,6 +55,8 @@ export function SetRoutingMode(arg1:string):Promise<boolean>;
 export function SimpleConnect(arg1:boolean):Promise<boolean>;
 
 export function SkipLogin():Promise<main.AccountInfo>;
+
+export function StartAutoPing():Promise<void>;
 
 export function StartWebLogin():Promise<string>;
 

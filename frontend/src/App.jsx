@@ -50,6 +50,8 @@ import {
   PingNode,
   PingAllNodes,
   PingNodes,
+  StartAutoPing,
+  IsAutoPinging,
   GetCoreStatus,
   ToggleCore,
   SetRoutingMode,
@@ -130,6 +132,10 @@ export default function App() {
   const [selectedNodeIds, setSelectedNodeIds] = useState([]); // 节点列表多选（Ctrl+A / Ctrl+点击 / Shift+点击）
   const [switchingNodeId, setSwitchingNodeId] = useState(null); // 正在切换中的节点 ID
   const [isPingingAll, setIsPingingAll] = useState(false);
+  // 后台自动测速（启动 / 订阅更新后 / 仪表盘刷新按钮）是否进行中，由后端 kncloud:auto-ping 事件驱动
+  const [autoTesting, setAutoTesting] = useState(false);
+  // 仪表盘节点网格的显示顺序（节点 ID）。测速进行中保持不动，一轮结束后再按延迟重排，避免方块边测边跳
+  const [quickPickOrder, setQuickPickOrder] = useState([]);
 
   // Subscriptions & Logs
   const [subscriptions, setSubscriptions] = useState([]);
@@ -216,6 +222,37 @@ export default function App() {
       if (typeof off === 'function') off();
     };
   }, []);
+
+  // 测速结果逐个推送：边测边更新延迟；后台自动测速开始/结束只改卡片头部的小指示，不弹提示
+  useEffect(() => {
+    const offDelay = EventsOn('kncloud:node-delay', (ev) => {
+      if (!ev || !ev.id) return;
+      setNodes(prev => prev.map(n => (n.id === ev.id ? { ...n, delay: ev.delay } : n)));
+    });
+    const offAuto = EventsOn('kncloud:auto-ping', async (ev) => {
+      const running = !!(ev && ev.running);
+      setAutoTesting(running);
+      if (!running) {
+        try { setNodes(await GetNodes()); } catch (e) { /* ignore */ }
+      }
+    });
+    // 界面加载晚于后台测速开始时，补查一次进行中状态
+    IsAutoPinging().then(r => setAutoTesting(!!r)).catch(() => {});
+    return () => {
+      if (typeof offDelay === 'function') offDelay();
+      if (typeof offAuto === 'function') offAuto();
+    };
+  }, []);
+
+  const handleRetestAll = async () => {
+    if (autoTesting || isPingingAll) return;
+    setAutoTesting(true); // 乐观显示；结束由 kncloud:auto-ping 事件复位
+    try {
+      await StartAutoPing();
+    } catch (e) {
+      setAutoTesting(false);
+    }
+  };
 
   // 关闭按钮的语义取决于「关闭窗口时最小化到托盘」开关
   const closeWindowTitle = settings.minimizeToTray
@@ -738,19 +775,46 @@ export default function App() {
   // Filtered nodes
   const filteredNodes = nodes;
 
-  // 仪表盘推荐节点：按真连接延迟排序（已测速升序 → 超时 → 未测速垫底），取前 3 个
-  // 当前节点一定在其中（仪表盘只在这里显示当前节点，顶部状态栏不再重复节点名）
-  const quickPickSorted = [...nodes].sort((a, b) => {
-    const rank = (d) => (d > 0 ? 0 : d === -2 ? 1 : 2);
-    if (rank(a.delay) !== rank(b.delay)) return rank(a.delay) - rank(b.delay);
-    return rank(a.delay) === 0 ? a.delay - b.delay : 0;
-  });
+  // 仪表盘节点网格：全部节点按真连接延迟排序（已测速升序 → 超时 → 未测速垫底，同档保持原顺序）。
+  // 当前节点原位高亮，不置顶：点击切换时方块不移动。
+  const delayRank = (d) => (d > 0 ? 0 : d === -2 ? 1 : 2);
+  const sortByDelay = (list) => list
+    .map((n, i) => ({ n, i }))
+    .sort((x, y) => {
+      const rx = delayRank(x.n.delay), ry = delayRank(y.n.delay);
+      if (rx !== ry) return rx - ry;
+      if (rx === 0 && x.n.delay !== y.n.delay) return x.n.delay - y.n.delay;
+      return x.i - y.i;
+    })
+    .map(x => x.n);
+  const pingInProgress = autoTesting || isPingingAll;
+  const nodeIdsKey = nodes.map(n => n.id).join('|');
+  useEffect(() => {
+    setQuickPickOrder(prev => {
+      if (pingInProgress && prev.length) {
+        // 测速中：保持现有顺序，只剔除已删除的、把新增的接到末尾
+        const ids = new Set(nodes.map(n => n.id));
+        const kept = prev.filter(id => ids.has(id));
+        const keptSet = new Set(kept);
+        return [...kept, ...nodes.filter(n => !keptSet.has(n.id)).map(n => n.id)];
+      }
+      return sortByDelay(nodes).map(n => n.id);
+    });
+    // 只在节点集合变化、或一轮测速开始/结束时重排；单个延迟更新不触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeIdsKey, pingInProgress]);
   const quickPickNodes = (() => {
-    const top = quickPickSorted.slice(0, 3);
-    const cur = nodes.find(n => n.active);
-    if (cur && !top.some(n => n.id === cur.id)) return [cur, ...top.slice(0, 2)];
-    return top;
+    const byId = new Map(nodes.map(n => [n.id, n]));
+    const ordered = quickPickOrder.map(id => byId.get(id)).filter(Boolean);
+    // 顺序尚未同步到最新节点集合的那一帧：补上缺失的节点
+    if (ordered.length !== nodes.length) {
+      const seen = new Set(ordered.map(n => n.id));
+      nodes.forEach(n => { if (!seen.has(n.id)) ordered.push(n); });
+    }
+    return ordered;
   })();
+  const tileDelayClass = (d) => d > 0 ? (d < 300 ? 'qp-delay-good' : d < 800 ? 'qp-delay-medium' : 'qp-delay-bad') : d === -2 ? 'qp-delay-bad' : 'qp-delay-none';
+  const tileDelayText = (d) => d > 0 ? `${d} ms` : d === -2 ? '超时' : '未测';
 
   // 四选一的当前模式：点击后立即显示目标（乐观），否则按真实状态（TUN 优先于分流策略）
   const MODE_ORDER = ['bypass-cn', 'global', 'direct', 'tun'];
@@ -1224,51 +1288,52 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Quick Node Switcher in Dashboard */}
+              {/* Quick Node Switcher in Dashboard：全部节点紧凑网格，点击即切换 */}
               <div className="win11-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                  <h3 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>推荐节点快速选择</h3>
-                  <button className="win11-btn" onClick={() => setActiveTab('servers')}>
-                    查看全部节点 ({nodes.length})
-                  </button>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-                  {quickPickNodes.slice(0, 3).map(node => (
-                    <div
-                      key={node.id}
-                      onClick={() => handleSelectNode(node.id)}
-                      style={{
-                        padding: '12px 14px',
-                        borderRadius: '6px',
-                        border: node.active ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
-                        background: node.active ? 'var(--accent-subtle)' : 'var(--bg-card)',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '6px',
-                        transition: 'all 0.15s ease'
-                      }}
+                <div className="qp-header">
+                  <div className="qp-title">
+                    <h3>推荐节点快速选择</h3>
+                    {pingInProgress ? (
+                      <span className="qp-testing"><LoaderCircle size={12} className="spin" />测速中…</span>
+                    ) : (
+                      <span className="qp-hint">按延迟排序 · 点击切换</span>
+                    )}
+                  </div>
+                  <div className="qp-actions">
+                    <button
+                      className="win11-btn qp-icon-btn"
+                      onClick={handleRetestAll}
+                      disabled={pingInProgress || nodes.length === 0}
+                      title="重新测速全部节点"
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                          <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
-                          {node.active && <span className="node-current-tag">当前节点</span>}
-                        </span>
-                        {(node.delay > 0 || node.delay === -2) && (
-                          <span className={`latency-pill ${node.delay > 0 && node.delay < 300 ? 'latency-good' : node.delay < 800 ? 'latency-medium' : 'latency-none'}`}>
-                            <Zap size={12} /> {node.delay > 0 ? `${node.delay} ms` : '超时'}
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {node.name}
-                      </div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                        {node.address}:{node.port}
-                      </div>
-                    </div>
-                  ))}
+                      <RefreshCw size={13} className={pingInProgress ? 'spin' : ''} />
+                    </button>
+                    <button className="win11-btn" onClick={() => setActiveTab('servers')}>
+                      管理节点 ({nodes.length})
+                    </button>
+                  </div>
                 </div>
+                {nodes.length === 0 ? (
+                  <div className="qp-empty">暂无节点，请先更新订阅或导入节点</div>
+                ) : (
+                  <div className="qp-grid">
+                    {quickPickNodes.map(node => (
+                      <button
+                        key={node.id}
+                        type="button"
+                        className={`qp-tile${node.active ? ' active' : ''}${switchingNodeId === node.id ? ' switching' : ''}`}
+                        onClick={() => handleSelectNode(node.id)}
+                        title={`${node.name}\n${node.protocol} · ${node.address}:${node.port}`}
+                      >
+                        <span className="qp-name">{node.name}</span>
+                        <span className="qp-meta">
+                          <span className={`qp-delay ${tileDelayClass(node.delay)}`}>{tileDelayText(node.delay)}</span>
+                          {node.active && <span className="node-current-tag qp-current">当前</span>}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

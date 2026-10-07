@@ -58,6 +58,10 @@ export function ImportNodesFromLinks(arg1) {
   return window['go']['main']['App']['ImportNodesFromLinks'](arg1);
 }
 
+export function IsAutoPinging() {
+  return window['go']['main']['App']['IsAutoPinging']();
+}
+
 export function IsWindowMaximized() {
   return window['go']['main']['App']['IsWindowMaximized']();
 }
@@ -104,6 +108,10 @@ export function SimpleConnect(arg1) {
 
 export function SkipLogin() {
   return window['go']['main']['App']['SkipLogin']();
+}
+
+export function StartAutoPing() {
+  return window['go']['main']['App']['StartAutoPing']();
 }
 
 export function StartWebLogin() {

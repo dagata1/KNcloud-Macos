@@ -133,6 +133,7 @@ type App struct {
 	tunDNSGuard       *tunDNSGuard   // TUN 开启时拦截发往物理网卡 DNS 的查询（WFP 动态会话）
 	tunV6             bool           // 是否写过 2000::/3 防泄漏路由
 	tunPausedSysProxy bool           // TUN 开启时暂停了 Windows 系统代理，关 TUN 时恢复
+	autoPing          autoPinger     // 后台自动测速（autoping.go）
 	account           AccountInfo
 	quitting          bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
 	cleaned           bool             // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
@@ -262,13 +263,19 @@ func (a *App) startup(ctx context.Context) {
 		loggedIn := a.account.LoggedIn
 		subID := a.account.SubID
 		a.mu.RUnlock()
+		synced := false
 		if loggedIn && subID != "" {
 			if err := a.refreshSubscription(subID); err == nil {
+				synced = true // refreshSubscription 成功时已触发自动测速
 				// 同步完成后通知前端刷新，避免前端停留在「无节点 / 连接失败」状态
 				if a.ctx != nil {
 					runtime.EventsEmit(a.ctx, "kncloud:refresh")
 				}
 			}
+		}
+		// 没有订阅或同步失败：仍对本地已有节点做一轮启动测速
+		if !synced {
+			a.requestAutoPing()
 		}
 	}()
 
@@ -659,6 +666,11 @@ func (a *App) DeleteNode(id string) error {
 }
 
 func (a *App) PingNode(id string) int {
+	return a.pingNode(id, false)
+}
+
+// pingNode 真连接测速单个节点并回写延迟；quiet 时不逐个写日志（后台自动测速用，避免刷屏）。
+func (a *App) pingNode(id string, quiet bool) int {
 	a.mu.RLock()
 	var target NodeItem
 	found := false
@@ -669,6 +681,8 @@ func (a *App) PingNode(id string) int {
 			break
 		}
 	}
+	// TUN 接管时测速出站绑物理网卡，不经当前节点绕一圈（见 realDelayTestConfig）
+	egress := a.tunEgressIface
 	a.mu.RUnlock()
 
 	if !found {
@@ -676,7 +690,7 @@ func (a *App) PingNode(id string) int {
 	}
 
 	// 真连接测速：经该节点完整代理链路请求测速 URL
-	latency := testNodeRealDelay(target)
+	latency := testNodeRealDelay(target, egress)
 
 	a.mu.Lock()
 	for i := range a.nodes {
@@ -695,12 +709,38 @@ func (a *App) PingNode(id string) int {
 		})
 	}
 
+	if quiet {
+		return latency
+	}
 	if latency == -2 {
 		a.addLogInternal("warn", fmt.Sprintf("Real-connection test failed for node [%s] (timeout or unreachable)", target.Name))
 	} else {
 		a.addLogInternal("info", fmt.Sprintf("Real-connection test for node [%s]: %d ms", target.Name, latency))
 	}
 	return latency
+}
+
+// pingConcurrency 同时运行的测速临时 Xray 实例上限（每个实例约十几 MB 内存、一条到节点的连接）
+const pingConcurrency = 4
+
+// pingIDs 并发测速给定节点（最多 pingConcurrency 个同时进行），返回测通的个数。
+func (a *App) pingIDs(ids []string, quiet bool) int {
+	var wg sync.WaitGroup
+	var ok atomic.Int32
+	sem := make(chan struct{}, pingConcurrency)
+	for _, id := range ids {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(nodeID string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if a.pingNode(nodeID, quiet) > 0 {
+				ok.Add(1)
+			}
+		}(id)
+	}
+	wg.Wait()
+	return int(ok.Load())
 }
 
 func (a *App) PingNodes(ids []string) []NodeItem {
@@ -725,19 +765,7 @@ func (a *App) PingNodes(ids []string) []NodeItem {
 		return a.GetNodes()
 	}
 
-	// 并发真连接测速，最多同时 3 个临时实例
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3)
-	for _, id := range targets {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(nodeID string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			a.PingNode(nodeID)
-		}(id)
-	}
-	wg.Wait()
+	a.pingIDs(targets, false)
 
 	a.addLogInternal("info", fmt.Sprintf("Real-connection latency test completed for %d selected nodes", len(targets)))
 	return a.GetNodes()
@@ -1078,6 +1106,8 @@ func (a *App) refreshSubscription(id string) error {
 
 	a.addLogInternal("info", fmt.Sprintf("Subscription [%s] updated, %d nodes parsed", subName, len(nodes)))
 	a.savePersisted()
+	// 订阅更新后后台自动测速全部节点（不阻塞调用方；自动测速协程在本函数释放锁后才读节点）
+	a.requestAutoPing()
 	return nil
 }
 
