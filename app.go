@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -119,6 +120,7 @@ type App struct {
 	lastUpSample    int64
 	lastDownSample  int64
 	xrayInst        *xcore.Instance
+	coreNodeID      string        // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
 	bridge          *anyTLSBridge // AnyTLS 协议桥（Xray 无 AnyTLS 出站，见 anytls.go）
 	bridgeAddr      string        // 桥的本地 SOCKS 地址，生成 Xray 出站时用
 	tunCmd          *exec.Cmd
@@ -360,49 +362,141 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// 先定位节点再改动任何状态：找不到时不应把现有选择清空。
 	var selected NodeItem
 	found := false
 	for i := range a.nodes {
 		if a.nodes[i].ID == id {
-			a.nodes[i].Active = true
 			selected = a.nodes[i]
 			found = true
-			a.activeNodeID = id
-		} else {
-			a.nodes[i].Active = false
+			break
 		}
 	}
 	if !found {
 		return selected, fmt.Errorf("node not found")
 	}
 
+	// 记下切换前的节点，切换失败时据此回滚，避免把用户钉在一个连不上的节点上
+	// （activeNodeID 会落盘，重启后也会自动恢复该节点）。
+	prevID := a.activeNodeID
+	wasCoreRunning := a.coreRunning
+	a.setActiveNodeLocked(id)
+	selected.Active = true
+
 	a.addLogInternal("info", fmt.Sprintf("Primary route switched to node: [%s] %s (%s:%d)", selected.Protocol, selected.Name, selected.Address, selected.Port))
 
-	// 换节点必须让「出口 IP」立刻改变，这就要求把承载旧节点的连接全部拆掉：
-	//  - TUN 在跑：走完整切换（停转发 → 换内核 → 清 DNS 缓存 → 重铺路由 → 拉起转发）。
-	//    存量 TCP/keep-alive 连接挂在旧节点上不会自己迁移，只重铺路由是不够的。
-	//  - 仅系统代理：重启内核即可，新请求走新节点；同样要清 DNS 缓存。
+	// 换节点必须让「出口 IP」立刻改变：
+	//  - TUN 在跑：走完整切换（停转发 → 热切换出站 → 清 DNS 缓存 → 重铺路由 → 拉起转发）。
+	//    存量 TCP/keep-alive 连接挂在旧节点上不会自己迁移，只重铺路由是不够的；
+	//    停转发会拆掉 TUN 上的全部连接。
+	//  - 仅系统代理：热切换 proxy 出站（入站监听不断、新请求走新节点），
+	//    热切换不可用时回退为整体重启内核；同样要清 DNS 缓存。
+	var err error
 	if a.tunRunning {
-		if err := a.tunHardSwitchLocked(selected); err != nil {
-			// 切换失败则 TUN 已处于半拆状态，直接软停让流量回到直连，
-			// 避免留下「界面显示新节点、实际无隧道」的错配状态。
-			a.tunSoftStopLocked()
+		err = a.tunHardSwitchLocked(selected)
+		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to switch node in TUN mode: %v", err))
-			a.savePersisted()
-			return selected, err
+			if !errors.Is(err, errNodeRejected) {
+				// 切换失败则 TUN 已处于半拆状态，直接软停让流量回到直连，
+				// 避免留下「界面显示新节点、实际无隧道」的错配状态。
+				a.tunSoftStopLocked()
+			}
 		}
 	} else if a.coreRunning {
-		if err := a.startCoreLocked(); err != nil {
-			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node switch: %v", err))
-			a.coreRunning = false
-			a.savePersisted()
-			return selected, err
+		err = a.switchCoreNodeLocked(selected)
+		if err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Failed to switch core to the new node: %v", err))
+		} else {
+			// 清 DNS 缓存，否则检测站可能继续命中旧节点的解析结果。
+			flushDnsClientCache()
 		}
-		// 清 DNS 缓存，否则检测站可能继续命中旧节点的解析结果。
-		flushDnsClientCache()
+	}
+	if err != nil {
+		a.rollbackNodeSelectionLocked(prevID, id, wasCoreRunning)
+		a.savePersisted()
+		selected.Active = false
+		return selected, err
 	}
 	a.savePersisted()
 	return selected, nil
+}
+
+// setActiveNodeLocked 把 id 标为唯一的 Active 节点（调用方需持有写锁）。
+func (a *App) setActiveNodeLocked(id string) {
+	for i := range a.nodes {
+		a.nodes[i].Active = a.nodes[i].ID == id
+	}
+	a.activeNodeID = id
+}
+
+// rollbackNodeSelectionLocked 换节点失败后恢复到切换前的节点（调用方需持有写锁）。
+//
+//   - 选择状态（Active / activeNodeID）一律退回旧节点；
+//   - 内核若因整体重启失败而停掉，尽力用旧节点重新拉起；
+//   - 内核仍在跑但可能已换到新节点（TUN 硬切换在出站替换之后的步骤失败），
+//     尽力把出站切回旧节点，保证「界面显示的节点」与「内核实际出口」一致。
+//
+// TUN 本身不在此恢复：沿用原有语义，失败即软停回直连，由用户重新开启。
+func (a *App) rollbackNodeSelectionLocked(prevID, failedID string, wasCoreRunning bool) {
+	if prevID == "" || prevID == failedID {
+		return
+	}
+	var prev *NodeItem
+	for i := range a.nodes {
+		if a.nodes[i].ID == prevID {
+			prev = &a.nodes[i]
+			break
+		}
+	}
+	if prev == nil {
+		return
+	}
+	a.setActiveNodeLocked(prevID)
+	prevNode := *prev
+	a.addLogInternal("warn", fmt.Sprintf("Node switch failed, reverted selection to [%s] %s", prevNode.Protocol, prevNode.Name))
+
+	switch {
+	case wasCoreRunning && !a.coreRunning:
+		if err := a.startCoreLocked(); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Failed to restore core on previous node: %v", err))
+			return
+		}
+		a.coreRunning = true
+		a.addLogInternal("info", fmt.Sprintf("Core restored on previous node: %s", prevNode.Name))
+	case a.coreRunning && a.coreNodeID != "" && a.coreNodeID != prevID:
+		if err := a.switchCoreNodeLocked(prevNode); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Failed to switch core back to previous node: %v", err))
+		}
+	}
+}
+
+// switchCoreNodeLocked 让正在运行的内核改走 node（调用方需持有写锁，且 node 已置为 Active）。
+//
+// 优先热切换 proxy 出站：入站监听保留，本机应用和 TUN 转发不会在切换瞬间被拒连。
+// 只有热切换「不可用」时才回退整体重启；新节点本身有问题时现网出站原样保留，
+// 直接把错误交给调用方回滚，而不是重启一个注定失败的内核。
+func (a *App) switchCoreNodeLocked(node NodeItem) error {
+	err := a.hotSwapProxyOutboundLocked(node)
+	if err == nil {
+		a.coreNodeID = node.ID
+		a.addLogInternal("info", fmt.Sprintf("Switched outbound to [%s] %s without restarting the core", node.Protocol, node.Name))
+		return nil
+	}
+	if !errors.Is(err, errHotSwapUnavailable) {
+		return err
+	}
+	a.addLogInternal("warn", fmt.Sprintf("Hot switch unavailable (%v), restarting core", err))
+	return a.restartCoreLocked()
+}
+
+// restartCoreLocked 以当前 Active 节点整体重启内核（调用方需持有写锁）。
+// 失败时内核已停，coreRunning 置 false。
+func (a *App) restartCoreLocked() error {
+	if err := a.startCoreLocked(); err != nil {
+		a.coreRunning = false
+		return fmt.Errorf("restart core: %w", err)
+	}
+	return nil
 }
 
 func (a *App) AddNode(node NodeItem) error {

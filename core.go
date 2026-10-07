@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,9 +17,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xtls/xray-core/common"
 	xcore "github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/infra/conf/serial"
+	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/infra/conf/serial"
 
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
@@ -39,8 +43,8 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/grpc"
 	_ "github.com/xtls/xray-core/transport/internet/httpupgrade"
 	_ "github.com/xtls/xray-core/transport/internet/reality"
-	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
+	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tls"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
 )
@@ -192,8 +196,8 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	}
 
 	cfg := map[string]interface{}{
-		"log": map[string]interface{}{"loglevel": "warning"},
-		"dns": map[string]interface{}{"servers": dnsServers, "queryStrategy": "UseIP"},
+		"log":   map[string]interface{}{"loglevel": "warning"},
+		"dns":   map[string]interface{}{"servers": dnsServers, "queryStrategy": "UseIP"},
 		"stats": map[string]interface{}{},
 		"policy": map[string]interface{}{
 			"levels": map[string]interface{}{
@@ -219,6 +223,11 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 func adsBlockRule() ruleObj {
 	return ruleObj{Type: "field", Domain: []string{"geosite:category-ads-all"}, OutboundTag: "block"}
 }
+
+// proxyOutboundTag 代理出站在 Xray 配置中的固定 tag。
+// 路由规则按该 tag 指向出站，热切换节点时也按它定位并替换 handler，
+// 因此它必须与 buildProxyOutbound 里写死的 "tag" 保持一致。
+const proxyOutboundTag = "proxy"
 
 // buildProxyOutbound 生成 Xray 的 proxy 出站。
 // bridgeAddr 仅 AnyTLS 用得上：Xray 不认识 AnyTLS，只能把流量交给 sing-box 协议桥，
@@ -262,9 +271,9 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool, bridgeAddr string) (map[
 		stream["tlsSettings"] = tls
 	case "reality":
 		reality := map[string]interface{}{
-			"serverName": firstNonEmpty(node.SNI, node.Address),
-			"publicKey":  node.PBK,
-			"shortId":    node.SID,
+			"serverName":  firstNonEmpty(node.SNI, node.Address),
+			"publicKey":   node.PBK,
+			"shortId":     node.SID,
 			"fingerprint": firstNonEmpty(node.FP, "chrome"),
 		}
 		stream["security"] = "reality"
@@ -413,6 +422,7 @@ func (a *App) startCoreLocked() error {
 		return fmt.Errorf("failed to start core: %w", err)
 	}
 	a.xrayInst = inst
+	a.coreNodeID = node.ID
 	a.addLogInternal("info", fmt.Sprintf("Xray-core %s started | SOCKS5 127.0.0.1:%d / HTTP 127.0.0.1:%d | node: %s",
 		xrayCoreVersion(), a.settings.SocksPort, a.settings.HttpPort, node.Name))
 	return nil
@@ -424,6 +434,7 @@ func (a *App) stopCoreLocked() {
 		a.xrayInst.Close()
 		a.xrayInst = nil
 	}
+	a.coreNodeID = ""
 	a.stopBridgeLocked()
 }
 
@@ -583,4 +594,154 @@ func testNodeRealDelay(node NodeItem) int {
 		return -2
 	}
 	return best
+}
+
+// ------------------------- 节点热切换 -------------------------
+
+// errHotSwapUnavailable 表示无法热切换（内核未运行、拿不到出站管理器，或替换失败且
+// 旧出站也放不回去），调用方应回退到整体重启内核。
+//
+// 其余错误都意味着「新节点本身有问题，现网出站保持原样」：整体重启只会以同样的
+// 原因失败，还会白白拆掉正在工作的内核，所以调用方不应再重启。
+var errHotSwapUnavailable = errors.New("hot swap unavailable")
+
+// errNodeRejected 表示新节点在拆除任何现网状态之前就被拒绝（如配置构建失败），
+// TUN 隧道与内核出站均保持原样，调用方无需软停 TUN。
+var errNodeRejected = errors.New("node rejected before switching")
+
+// preparedOutbound 是已构建好、尚未装入内核的 proxy 出站。
+//
+// 拆成 prepare/commit 两步，是为了让 TUN 硬切换可以在拆隧道之前先验证新节点：
+// 新节点配置有问题时直接返回，隧道与现网出站都不受影响。
+type preparedOutbound struct {
+	node    NodeItem
+	handler *xcore.OutboundHandlerConfig
+	// bridge 新节点为 AnyTLS 时预先拉起的协议桥。提交成功后移交给 App，
+	// 未提交（失败或放弃）时由 discard 关闭，避免残留 sing-box 进程。
+	bridge *anyTLSBridge
+}
+
+func (p *preparedOutbound) discard() {
+	if p != nil && p.bridge != nil {
+		p.bridge.Stop()
+		p.bridge = nil
+	}
+}
+
+// prepareProxyOutboundLocked 为 node 构建新的 proxy 出站（调用方需持有写锁）。
+// 不触碰正在运行的内核；失败时现网出站保持原样。
+func (a *App) prepareProxyOutboundLocked(node NodeItem) (*preparedOutbound, error) {
+	if a.xrayInst == nil {
+		return nil, errHotSwapUnavailable
+	}
+	p := &preparedOutbound{node: node}
+
+	// AnyTLS：Xray 无此出站，新节点要先起自己的协议桥，proxy 出站指向它。
+	// 旧桥（如有）此时仍在服务旧节点，等新出站就位后才停。
+	bridgeAddr := ""
+	if needsSingBoxBridge(node.Protocol) {
+		bridge, err := startAnyTLSBridge(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start AnyTLS bridge: %w", err)
+		}
+		p.bridge = bridge
+		bridgeAddr = bridge.addr
+	}
+
+	proxyOut, err := buildProxyOutbound(node, a.settings.MuxEnabled, bridgeAddr)
+	if err != nil {
+		p.discard()
+		return nil, err
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"outbounds": []interface{}{proxyOut},
+	})
+	if err != nil {
+		p.discard()
+		return nil, err
+	}
+	pbCfg, err := serial.DecodeJSONConfig(bytes.NewReader(raw))
+	if err != nil {
+		p.discard()
+		return nil, fmt.Errorf("failed to parse outbound config: %w", err)
+	}
+	builtCfg, err := pbCfg.Build()
+	if err != nil {
+		p.discard()
+		return nil, fmt.Errorf("failed to build outbound config: %w", err)
+	}
+	if len(builtCfg.Outbound) == 0 {
+		p.discard()
+		return nil, errHotSwapUnavailable
+	}
+	p.handler = builtCfg.Outbound[0]
+	return p, nil
+}
+
+// commitProxyOutboundLocked 把 prepare 好的出站换进正在运行的内核（调用方需持有写锁）。
+// 无论成败，p 都被消费：失败时其协议桥会被关闭。
+func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
+	inst := a.xrayInst
+	if inst == nil {
+		p.discard()
+		return errHotSwapUnavailable
+	}
+	mgr, ok := inst.GetFeature(outbound.ManagerType()).(outbound.Manager)
+	if !ok {
+		p.discard()
+		return errHotSwapUnavailable
+	}
+
+	// 1) 摘除旧 handler。Xray 的 AddHandler 遇到同名 tag 会直接报错，
+	//    所以必须先摘再加；RemoveHandler 只从表里删除、不会关闭 handler，
+	//    因此先取出引用，等新 handler 就位后再由我们关闭。
+	//    （proxy 若是默认出站，摘除会把 defaultHandler 置空，AddHandler 时自动补上。）
+	old := mgr.GetHandler(proxyOutboundTag)
+	if err := mgr.RemoveHandler(context.Background(), proxyOutboundTag); err != nil {
+		p.discard()
+		return fmt.Errorf("failed to detach current outbound: %w", err)
+	}
+
+	// 2) 装入新 handler。失败则把旧 handler 放回去，避免代理出站凭空消失
+	//    （此时 tag 是空的，放回不会冲突）。
+	if err := xcore.AddOutboundHandler(inst, p.handler); err != nil {
+		p.discard()
+		if old != nil {
+			if reAddErr := mgr.AddHandler(context.Background(), old); reAddErr == nil {
+				return fmt.Errorf("failed to apply new outbound (previous node restored): %w", err)
+			}
+		}
+		// 回滚也失败：代理出站已不可用，交给调用方整体重启内核兜底。
+		return fmt.Errorf("%w: failed to apply new outbound and could not restore the previous one: %v",
+			errHotSwapUnavailable, err)
+	}
+
+	// 3) 关闭旧 handler，释放其 mux 连接（RemoveHandler 不负责这件事）。
+	//    注意：非 mux 的存量连接各自持有底层连接，不会因此中断。
+	if old != nil {
+		common.Close(old)
+	}
+	// 4) 旧节点若是 AnyTLS，现在才停它的桥（会切断旧节点上的全部连接），
+	//    再把新节点的桥（如有）移交给 App 管理。
+	a.stopBridgeLocked()
+	if p.bridge != nil {
+		a.bridge = p.bridge
+		a.bridgeAddr = p.bridge.addr
+		p.bridge = nil
+	}
+	return nil
+}
+
+// hotSwapProxyOutboundLocked 在不重启内核的前提下，把 proxy 出站换成新节点
+// （调用方需持有写锁）。
+//
+// 整体重启内核会连带销毁 SOCKS5/HTTP 入站监听，切换期间浏览器与 TUN 转发都会
+// 短暂被拒连；入站流量计数器也随实例一起销毁。换 handler 只影响代理出站本身：
+// 入站监听与 direct 出站不动，统计计数器按同名 tag 复用（GetOrRegisterCounter）。
+func (a *App) hotSwapProxyOutboundLocked(node NodeItem) error {
+	p, err := a.prepareProxyOutboundLocked(node)
+	if err != nil {
+		return err
+	}
+	return a.commitProxyOutboundLocked(p)
 }

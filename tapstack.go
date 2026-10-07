@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -827,17 +828,44 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 		gw, dnsAddr = nativeSSTapRouterIP, ""
 	}
 
+	// 0) 拆隧道之前先把新节点的出站构建好：新节点配置有问题时直接返回，
+	//    隧道和现网出站都原样保留（errNodeRejected，调用方不必软停 TUN）。
+	//    热切换不可用（如内核实例缺失）则留到第 2 步整体重启兜底。
+	var prepared *preparedOutbound
+	if a.coreRunning {
+		p, err := a.prepareProxyOutboundLocked(node)
+		switch {
+		case err == nil:
+			prepared = p
+		case errors.Is(err, errHotSwapUnavailable):
+		default:
+			return fmt.Errorf("%w: %v", errNodeRejected, err)
+		}
+	}
+
 	// 1) 停转发。stopTapForwarding 内部会 Destroy 协议栈，令所有 gvisor 端点
 	//    立即报错退出，其上的 SOCKS5 连接随之关闭；原生路径则终止子进程。
 	a.stopNativeTun()
 	a.stopTapForwarding()
 
-	// 2) 内核带上新节点重启。新 SOCKS5 监听器就绪后下面的新连接才有意义。
+	// 2) 内核换上新节点：优先热切换 proxy 出站（SOCKS5 入站监听不断），
+	//    不可用时整体重启。转发已停，TUN 上的旧连接此时都已拆掉。
 	if a.coreRunning {
-		if err := a.startCoreLocked(); err != nil {
-			a.addLogInternal("error", fmt.Sprintf("Node switch: restart core failed: %v", err))
-			a.coreRunning = false
-			return fmt.Errorf("restart core: %w", err)
+		err := errHotSwapUnavailable
+		if prepared != nil {
+			err = a.commitProxyOutboundLocked(prepared)
+		}
+		switch {
+		case err == nil:
+			a.coreNodeID = node.ID
+		case errors.Is(err, errHotSwapUnavailable):
+			if err := a.restartCoreLocked(); err != nil {
+				a.addLogInternal("error", fmt.Sprintf("Node switch: restart core failed: %v", err))
+				return err
+			}
+		default:
+			// 新出站装不上、旧出站已放回：内核仍在旧节点上，由调用方软停 TUN 并回滚选择
+			return fmt.Errorf("switch outbound: %w", err)
 		}
 	}
 
