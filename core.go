@@ -432,6 +432,7 @@ func (a *App) startCoreLocked() error {
 func (a *App) stopCoreLocked() {
 	if a.xrayInst != nil {
 		a.xrayInst.Close()
+		outboundConnTracker.Forget(a.xrayInst)
 		a.xrayInst = nil
 	}
 	a.coreNodeID = ""
@@ -702,6 +703,10 @@ func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 		return fmt.Errorf("failed to detach current outbound: %w", err)
 	}
 
+	// 推进出站连接的代际：此刻起开始的拨号都算新代际。旧 handler 已摘除，
+	// 分发器不会再把新请求交给它，因此在此之前开始的拨号都属于旧节点。
+	cut := outboundConnTracker.Advance()
+
 	// 2) 装入新 handler。失败则把旧 handler 放回去，避免代理出站凭空消失
 	//    （此时 tag 是空的，放回不会冲突）。
 	if err := xcore.AddOutboundHandler(inst, p.handler); err != nil {
@@ -717,9 +722,14 @@ func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 	}
 
 	// 3) 关闭旧 handler，释放其 mux 连接（RemoveHandler 不负责这件事）。
-	//    注意：非 mux 的存量连接各自持有底层连接，不会因此中断。
+	//    非 mux 的存量连接各自持有到旧节点的底层连接，关 handler 切不断它们，
+	//    所以再按代际关掉旧节点上的全部出站连接（见 conntrack.go）：
+	//    客户端的 keep-alive 连接随之断开，重连后即走新节点，出口 IP 立刻改变。
 	if old != nil {
 		common.Close(old)
+	}
+	if n := outboundConnTracker.CloseBefore(inst, cut); n > 0 {
+		a.addLogInternal("info", fmt.Sprintf("Closed %d connection(s) still using the previous node", n))
 	}
 	// 4) 旧节点若是 AnyTLS，现在才停它的桥（会切断旧节点上的全部连接），
 	//    再把新节点的桥（如有）移交给 App 管理。
