@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -55,6 +57,8 @@ type tapWinDevice struct {
 	tx       sync.Mutex
 	txEv     windows.Handle
 	txOv     *windows.Overlapped
+	// 诊断计数
+	RxPkts, RxBytes, TxPkts, TxBytes, TxErr, RxErr, TxMax atomic.Int64
 }
 
 var testTap = &tapWinDevice{}
@@ -231,7 +235,11 @@ func (d *tapWinDevice) Close() string {
 }
 
 func (d *tapWinDevice) NewLink() stack.LinkEndpoint {
-	return &tapLinkEndpoint{dev: d, stopCh: make(chan struct{})}
+	l := &tapLinkEndpoint{dev: d, stopCh: make(chan struct{})}
+	if v, err := strconv.Atoi(os.Getenv("KN_TAP_MTU")); err == nil && v >= 576 && v <= tapLinkMTU {
+		l.mtu = uint32(v)
+	}
+	return l
 }
 
 func (d *tapWinDevice) StopLink(l stack.LinkEndpoint, wait time.Duration) bool {
@@ -267,12 +275,22 @@ func (d *tapWinDevice) write(b []byte) error {
 	if err == nil || err == windows.ERROR_IO_PENDING {
 		err = windows.GetOverlappedResult(d.h, d.txOv, &n, true)
 	}
+	if err != nil {
+		d.TxErr.Add(1)
+	} else {
+		d.TxPkts.Add(1)
+		d.TxBytes.Add(int64(len(b)))
+		if int64(len(b)) > d.TxMax.Load() {
+			d.TxMax.Store(int64(len(b)))
+		}
+	}
 	return err
 }
 
 // ------------------------- gVisor 链路端点（TAP） -------------------------
 
 type tapLinkEndpoint struct {
+	mtu        uint32 // 0 = tapLinkMTU（KN_TAP_MTU 可覆盖，诊断用）
 	dev        *tapWinDevice
 	stopCh     chan struct{}
 	stopped    sync.WaitGroup
@@ -280,7 +298,12 @@ type tapLinkEndpoint struct {
 	dispatcher stack.NetworkDispatcher
 }
 
-func (e *tapLinkEndpoint) MTU() uint32                                  { return tapLinkMTU }
+func (e *tapLinkEndpoint) MTU() uint32 {
+	if e.mtu != 0 {
+		return e.mtu
+	}
+	return tapLinkMTU
+}
 func (e *tapLinkEndpoint) SetMTU(uint32)                                {}
 func (e *tapLinkEndpoint) MaxHeaderLength() uint16                      { return 0 }
 func (e *tapLinkEndpoint) LinkAddress() tcpip.LinkAddress               { return "" }
@@ -347,12 +370,15 @@ func (e *tapLinkEndpoint) readLoop(disp stack.NetworkDispatcher) {
 				return
 			default:
 			}
+			e.dev.RxErr.Add(1)
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		if n == 0 {
 			continue
 		}
+		e.dev.RxPkts.Add(1)
+		e.dev.RxBytes.Add(int64(n))
 		data := make([]byte, n)
 		copy(data, buf[:n])
 		deliverIPPacket(disp, data)
