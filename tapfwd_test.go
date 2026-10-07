@@ -432,3 +432,12 @@ func TestForwarderUDPUsesDedicatedInbound(t *testing.T) {
 		t.Fatalf("UDP associate went to the wrong inbound: dedicated=%d socks-in=%d", udpSocks.ctrlOpen.Load(), h.socks.ctrlOpen.Load())
 	}
 }
+
+// TUN 两端在同一台机器上（微秒级 RTT），RACK/TLP 会把正常的 ACK 延迟当成丢包：必须关闭
+func TestForwarderRACKDisabled(t *testing.T) {
+	h := newFwdHarness(t, tapForwarderConfig{})
+	var rec tcpip.TCPRecovery
+	if err := h.fwd.stack.TransportProtocolOption(tcp.ProtocolNumber, &rec); err != nil || rec != 0 {
+		t.Fatalf("TCPRecovery=%v err=%v, want 0 (RACK/TLP off)", rec, err)
+	}
+}

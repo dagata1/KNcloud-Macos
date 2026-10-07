@@ -89,6 +89,13 @@ func newTapForwarder(link stack.LinkEndpoint, cfg tapForwarderConfig) (*tapForwa
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPSendBufferSizeRangeOption{Min: 4 << 10, Default: 1 << 20, Max: 8 << 20})
 	cc := tcpip.CongestionControlOption("cubic")
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &cc)
+	// 关掉 RACK（连带 TLP）：这版 gVisor 的探测超时 PTO = 2×SRTT、没有 10ms 下限，TUN 两端在
+	// 同一台机器上，SRTT 只有几十到几百微秒，Windows 的 ACK 稍晚一点（延迟确认、调度抖动）就触发
+	// TLP + RACK 判丢，大量重传早已确认的数据、拥塞窗口反复减半。实测（TAP 后端）：33% 的段被
+	// 重传、抓包里全是 D-SACK，下载只有 5~50KB/s，而同节点 SOCKS 1MB/s。
+	// 退回经典的三次重复 ACK + SACK 恢复（RTO 下限 200ms）。
+	rec := tcpip.TCPRecovery(0)
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &rec)
 
 	if err := s.CreateNIC(1, link); err != nil {
 		s.Destroy()
