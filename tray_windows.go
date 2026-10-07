@@ -11,7 +11,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// trayIconData 是托盘图标：蓝色圆角底 + 白色 KN 字标，铺满整格（16~256 多尺寸 ICO），
+// trayIconData 是托盘图标：黑色圆角底（细灰描边）+ 白色 KN 字标，铺满整格（16~256 多尺寸 ICO），
 // 深色/浅色任务栏都清晰，比纯字标显得更大。
 // 不能用 build/windows/icon.ico —— 那个是应用图标，背景是不透明的黑色方块，
 // 放进深色任务栏会变成一坨黑。
