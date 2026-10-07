@@ -58,12 +58,7 @@ func (m *webLoginManager) stopLocked() {
 // StartWebLogin 打开浏览器进行网页登录授权，返回本次打开的授权 URL。
 // 结果通过事件 kncloud:web-login / kncloud:web-login-error 异步通知前端。
 func (a *App) StartWebLogin() (string, error) {
-	a.mu.RLock()
-	domain := a.account.Domain
-	a.mu.RUnlock()
-	if domain == "" {
-		domain = kncloudDefaultDomain
-	}
+	domain := a.resolveDomain()
 
 	// 惰性初始化回调服务管理器（指针化，防止拷贝内部互斥锁）；并发启动时由 a.mu 串行化
 	a.mu.Lock()

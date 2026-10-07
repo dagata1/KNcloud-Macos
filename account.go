@@ -70,12 +70,7 @@ func (a *App) Login(email, password string) (AccountInfo, error) {
 		return a.GetAccount(), fmt.Errorf("please enter email and password")
 	}
 
-	a.mu.RLock()
-	domain := a.account.Domain
-	a.mu.RUnlock()
-	if domain == "" {
-		domain = kncloudDefaultDomain
-	}
+	domain := a.resolveDomain()
 
 	token, err := v2boardLogin(domain, email, password)
 	if err != nil {
@@ -147,6 +142,13 @@ func (a *App) completeLogin(domain, email, token string) (AccountInfo, error) {
 
 // RefreshAccount 用登录凭证重新拉取套餐流量/到期信息；订阅地址变化时同步更新
 func (a *App) RefreshAccount() (AccountInfo, error) {
+	a.mu.RLock()
+	wasLoggedIn := a.account.LoggedIn
+	a.mu.RUnlock()
+	if wasLoggedIn {
+		a.resolveDomain() // 先查询最新官网地址，失败则沿用当前地址
+	}
+
 	a.mu.RLock()
 	loggedIn := a.account.LoggedIn
 	domain := a.account.Domain
