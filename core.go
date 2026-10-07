@@ -134,6 +134,17 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 			"sniffing": sniffing,
 		},
 	}
+	// TUN 的 UDP 走独立的、不嗅探的 SOCKS 入站：Xray 1.8.24 只要开了 sniffing 就会对每个
+	// UDP 会话首包跑 QUIC 嗅探器，而 SniffQUIC 在 CRYPTO 帧 offset+length 超过 2048 时
+	// 越界 panic（Chrome/Edge 的 Kyber ClientHello 即可触发），整个进程崩溃。
+	// TUN 下 UDP 本来就只按 IP 规则分流（destOverride 不含 quic），不嗅探不影响路由。
+	if a.tunEgressIface != "" && a.tunUDPPort != 0 {
+		inbounds = append(inbounds, map[string]interface{}{
+			"tag": tunUDPInboundTag, "listen": "127.0.0.1", "port": a.tunUDPPort,
+			"protocol": "socks",
+			"settings": map[string]interface{}{"auth": "noauth", "udp": true},
+		})
+	}
 
 	proxyOut, err := a.buildProxyOutboundLocked(node)
 	if err != nil {
@@ -461,7 +472,7 @@ func (a *App) coreTrafficSample() (up, down int64, ok bool) {
 	if !ok2 {
 		return 0, 0, false
 	}
-	for _, tag := range []string{"socks-in", "http-in"} {
+	for _, tag := range []string{"socks-in", "http-in", tunUDPInboundTag} {
 		if c := mgr.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", tag)); c != nil {
 			up += c.Value()
 		}

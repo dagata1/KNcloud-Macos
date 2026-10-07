@@ -413,3 +413,22 @@ func TestStripSocksUDPHeader(t *testing.T) {
 		t.Fatal("fragmented datagram must be dropped")
 	}
 }
+
+// UDP 必须走专用（不嗅探）的 SOCKS 入站，TCP 仍走 socks-in（Xray QUIC 嗅探器会 panic）
+func TestForwarderUDPUsesDedicatedInbound(t *testing.T) {
+	h := newFwdHarness(t, tapForwarderConfig{UDPIdle: 2 * time.Second})
+	udpSocks := startFakeSocks(t)
+	h.fwd.cfg.SocksUDP = udpSocks.addr
+	c := h.dialUDP([4]byte{203, 0, 113, 10}, 443)
+	defer c.Close()
+	c.Write([]byte("quic-initial"))
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	b := make([]byte, 512)
+	n, err := c.Read(b)
+	if err != nil || string(b[:n]) != "quic-initial" {
+		t.Fatalf("udp echo: %q %v", b[:n], err)
+	}
+	if udpSocks.ctrlOpen.Load() != 1 || h.socks.ctrlOpen.Load() != 0 {
+		t.Fatalf("UDP associate went to the wrong inbound: dedicated=%d socks-in=%d", udpSocks.ctrlOpen.Load(), h.socks.ctrlOpen.Load())
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -352,6 +353,32 @@ func TestTunCoreProfile(t *testing.T) {
 	}
 	if !strings.Contains(cfg, `"destOverride":["http","tls"]`) {
 		t.Fatalf("TUN mode: socks-in sniffing must be http/tls only: %s", cfg)
+	}
+	if strings.Contains(cfg, tunUDPInboundTag) {
+		t.Fatal("no UDP inbound without a port")
+	}
+	a.tunUDPPort = 23456
+	cfg, err = a.buildCoreConfigJSON(vless)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Inbounds []map[string]interface{} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(cfg), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, in := range parsed.Inbounds {
+		if in["tag"] == tunUDPInboundTag {
+			found = true
+			if in["sniffing"] != nil || in["port"] != float64(23456) || in["listen"] != "127.0.0.1" {
+				t.Fatalf("TUN UDP inbound must be loopback, unsniffed (Xray QUIC sniffer panics): %v", in)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("TUN mode: missing %s inbound: %s", tunUDPInboundTag, cfg)
 	}
 	t.Setenv("APPDATA", t.TempDir())
 	dir, err := ensureGeoAssets()

@@ -129,6 +129,7 @@ type App struct {
 	tunOps          routeOps       // 路由操作实现；nil 表示 Windows IP Helper（单测注入 fake）
 	tunPhys         physHop        // TUN 开启时的默认物理出口（绕过网段用）
 	tunEgressIface  string         // TUN 开启时的物理网卡名：Xray 出站 sockopt.interface 绑定它；空表示 TUN 未接管
+	tunUDPPort      int            // TUN 开启时 UDP 专用（不嗅探）SOCKS 入站端口；0 = 未启用
 	tunV6           bool           // 是否写过 2000::/3 防泄漏路由
 	prevRoutingMode string         // TUN 开启时被临时改写前的策略（全局直连 → 全局），关闭时恢复
 	tunSampleUp     int64

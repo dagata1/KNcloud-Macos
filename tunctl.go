@@ -100,6 +100,7 @@ func (a *App) startTapForwarding() error {
 	link := dev.NewLink()
 	f, err := newTapForwarder(link, tapForwarderConfig{
 		SocksAddr:   fmt.Sprintf("127.0.0.1:%d", a.settings.SocksPort),
+		SocksUDP:    a.tunSocksUDPAddr(),
 		DNSAddr:     tunDnsAddr,
 		DNSUpstream: "223.5.5.5:53",
 		BindIdx:     a.tunPhys.IfIndex,
@@ -126,6 +127,34 @@ func (a *App) stopTapForwarding() {
 	if !f.stop(2 * time.Second) {
 		a.addLogInternal("warn", "TUN forwarder goroutines still draining after 2s")
 	}
+}
+
+// tunUDPInboundTag TUN 专用的 UDP SOCKS 入站（不嗅探，见 buildCoreConfigJSON）
+const tunUDPInboundTag = "tun-udp-in"
+
+func (a *App) tunSocksUDPAddr() string {
+	if a.tunUDPPort == 0 {
+		return ""
+	}
+	return fmt.Sprintf("127.0.0.1:%d", a.tunUDPPort)
+}
+
+// pickFreeLoopbackPort 取一个 TCP 与 UDP 都空闲的回环端口（失败返回 0：UDP 退回 socks-in）
+func pickFreeLoopbackPort() int {
+	for i := 0; i < 5; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		u, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		l.Close()
+		if err == nil {
+			u.Close()
+			return port
+		}
+	}
+	return 0
 }
 
 // ------------------------- 对外开关 -------------------------
@@ -220,9 +249,11 @@ func (a *App) tunStartLocked() error {
 	}
 	wasCore := a.coreRunning
 	a.tunEgressIface = ifc.Name
+	a.tunUDPPort = pickFreeLoopbackPort()
 	if err := a.startCoreLocked(); err != nil {
 		a.addLogInternal("error", fmt.Sprintf("TUN: start core failed: %v", err))
 		a.tunEgressIface = ""
+		a.tunUDPPort = 0
 		if forced {
 			a.routingMode, a.prevRoutingMode = prevMode, ""
 		}
@@ -303,6 +334,7 @@ func (a *App) tunSoftStopLocked() {
 	}
 	if a.tunEgressIface != "" {
 		a.tunEgressIface = ""
+		a.tunUDPPort = 0
 		if a.coreRunning {
 			if err := a.startCoreLocked(); err != nil {
 				a.coreRunning = false

@@ -28,6 +28,7 @@ import (
 // tapForwarderConfig 转发运行时参数
 type tapForwarderConfig struct {
 	SocksAddr   string        // Xray SOCKS5 入站，如 127.0.0.1:10808
+	SocksUDP    string        // UDP ASSOCIATE 用的 SOCKS5 入站（不嗅探）；空 = SocksAddr
 	DNSAddr     string        // 劫持 DNS 地址（198.18.0.2）：发往它的查询转给 DNSUpstream
 	DNSUpstream string        // 如 223.5.5.5:53
 	BindIdx     uint32        // DNS 上游 socket 绑定的物理网卡（0 = 不绑定，单测用）
@@ -349,7 +350,11 @@ func (f *tapForwarder) relayDNS(flow *udpFlow, pc *gonet.UDPConn, dst *net.UDPAd
 
 // relayUDPSocks 非 DNS 的 UDP（QUIC/游戏/语音等）：SOCKS5 UDP ASSOCIATE 经 Xray 转发。
 func (f *tapForwarder) relayUDPSocks(flow *udpFlow, pc *gonet.UDPConn, dst *net.UDPAddr) {
-	ch, err := socksDialUDP(f.cfg.SocksAddr, 15*time.Second)
+	addr := f.cfg.SocksUDP
+	if addr == "" {
+		addr = f.cfg.SocksAddr
+	}
+	ch, err := socksDialUDP(addr, 15*time.Second)
 	if err != nil {
 		return
 	}
