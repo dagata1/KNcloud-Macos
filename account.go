@@ -309,9 +309,19 @@ func v2boardGetSubscribe(domain, token string) (int64, int64, int64, string, str
 		planName, _ = plan["name"].(string)
 	}
 
+	// getSubscribe returns the expiry as "expired_at" (unix seconds, null for
+	// plans without expiry). Reading "expire" always yielded 0, so every
+	// account was shown as 长期有效.
 	expireStr := "长期有效"
-	if exp := getInt("expire"); exp > 0 {
+	exp := getInt("expired_at")
+	if exp == 0 {
+		exp = getInt("expire")
+	}
+	if exp > 0 {
 		expireStr = time.Unix(exp, 0).Format("2006-01-02 到期")
+		if exp <= time.Now().Unix() {
+			expireStr = time.Unix(exp, 0).Format("2006-01-02 已到期")
+		}
 	}
 
 	return getInt("transfer_enable"), getInt("u"), getInt("d"), expireStr, planName, subURL, getStr("email"), nil
