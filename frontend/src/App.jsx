@@ -28,7 +28,6 @@ import {
   ArrowDownLeft,
   CheckCircle2,
   Sliders,
-  Radio,
   Search,
   Check,
   Copy,
@@ -1052,6 +1051,26 @@ export default function App() {
     );
   }
 
+  // 实时上传/下载（只统计走节点的流量），并入订阅卡右侧
+  const speedStats = (
+    <div className="speed-stats" title="仅统计经代理节点的流量">
+      <div className="speed-stat up">
+        <ArrowUpRight size={14} />
+        <div>
+          <div className="speed-val">{status.upSpeed}</div>
+          <div className="speed-total">累计 {status.totalUp}</div>
+        </div>
+      </div>
+      <div className="speed-stat down">
+        <ArrowDownLeft size={14} />
+        <div>
+          <div className="speed-val">{status.downSpeed}</div>
+          <div className="speed-total">累计 {status.totalDown}</div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
       {renderToasts()}
@@ -1156,8 +1175,8 @@ export default function App() {
 
               {account && account.loggedIn && (
                 <div className="win11-card account-card">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <h4 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>
                           {account.email}
@@ -1169,13 +1188,14 @@ export default function App() {
                       <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
                         已用 {fmtGB(account.usedUp + account.usedDown)} / {account.transferEnable > 0 ? fmtGB(account.transferEnable) : '无限'} · {account.expire}
                         {subscriptions[0] && (
-                          <span style={{ marginLeft: '12px', color: 'var(--text-tertiary)' }}>
+                          <div style={{ color: 'var(--text-tertiary)', marginTop: '3px', fontSize: '11px' }}>
                             上次同步: {subscriptions[0].updatedAt}
-                          </span>
+                          </div>
                         )}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
+                      {speedStats}
                       <button className="win11-btn" onClick={handleUpdateSubscription} disabled={syncing}>
                         <RefreshCw size={13} className={syncing ? 'spin' : ''} />
                         <span>{syncing ? '更新中...' : '更新订阅'}</span>
@@ -1229,60 +1249,10 @@ export default function App() {
                   </div>
               </div>
 
-              {/* 4 Metric Cards */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
-                <div className="win11-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '12px' }}>
-                    <span>实时上传</span>
-                    <ArrowUpRight size={16} color="#0078d4" />
-                  </div>
-                  <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '8px', color: 'var(--text-primary)' }}>
-                    {status.upSpeed}
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                    累计上行: {status.totalUp}
-                  </div>
-                </div>
-
-                <div className="win11-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '12px' }}>
-                    <span>实时下载</span>
-                    <ArrowDownLeft size={16} color="#107c41" />
-                  </div>
-                  <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '8px', color: 'var(--text-primary)' }}>
-                    {status.downSpeed}
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                    累计下行: {status.totalDown}
-                  </div>
-                </div>
-
-                <div className="win11-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '12px' }}>
-                    <span>{status.tunnelMode ? '流量接管' : 'Windows 系统代理'}</span>
-                    <Radio size={16} color={status.tunnelMode || status.systemProxy ? '#107c41' : '#888'} />
-                  </div>
-                  <div style={{ fontSize: '17px', fontWeight: 600, marginTop: '10px', color: status.tunnelMode || status.systemProxy ? 'var(--accent)' : 'var(--text-secondary)' }}>
-                    {status.tunnelMode ? 'TUN 接管' : status.systemProxy ? '已接管 (127.0.0.1)' : '未接管 (直连)'}
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
-                    {status.tunnelMode ? '系统代理未启用（关闭 TUN 后恢复）' : <>                    端口: 127.0.0.1:{settings.httpPort}</>}
-                  </div>
-                </div>
-
-                <div className="win11-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '12px' }}>
-                    <span>已载入服务器</span>
-                    <Server size={16} color="#9b59b6" />
-                  </div>
-                  <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '8px', color: 'var(--text-primary)' }}>
-                    {nodes.length} 个节点
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                    覆盖 {subscriptions.length} 个订阅源
-                  </div>
-                </div>
-              </div>
+              {/* 未登录时没有订阅卡，实时速率单独成一张小卡 */}
+              {!(account && account.loggedIn) && (
+                <div className="win11-card speed-card-solo">{speedStats}</div>
+              )}
 
               {/* Quick Node Switcher in Dashboard：全部节点紧凑网格，点击即切换 */}
               <div className="win11-card">

@@ -1525,3 +1525,59 @@ select.win11-input option {
 .dark-theme .qp-delay-good { color: #3fbf6f; }
 .dark-theme .qp-delay-medium { color: #e5a50a; }
 .dark-theme .qp-delay-bad { color: #ff6b6b; }
+
+/* ---------- 订阅卡内的实时速率 ---------- */
+.speed-stats {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-right: 8px;
+  padding: 4px;
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.speed-stat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 104px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.speed-stat + .speed-stat {
+  border-left: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.speed-stat.up svg { color: #3b9ced; }
+.speed-stat.down svg { color: #2fb36d; }
+
+.speed-val {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.speed-total {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.speed-card-solo {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.speed-card-solo .speed-stats {
+  margin-right: 0;
+}
+
+.account-card .win11-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
