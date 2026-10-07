@@ -1583,8 +1583,8 @@ select.win11-input option {
 }
 
 /* ---------- 订阅卡：左半账户/流量/操作，右半实时速率 ---------- */
-.acct-split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.acct-left { padding: 18px 20px 12px; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.acct-split { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
+.acct-left { padding: 14px 20px 18px; margin: 0; justify-content: center; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .acct-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .acct-email {
   font-size: 15px; font-weight: 600; color: var(--text-primary);
@@ -1601,16 +1601,17 @@ select.win11-input option {
 .acct-value .acct-sub { font-size: 12px; font-weight: 400; }
 .acct-bar { margin-top: 8px; }
 .acct-sub { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
-.acct-actions { display: flex; align-items: center; gap: 2px; margin-left: -10px; }
+.acct-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.acct-actions { display: flex; align-items: center; gap: 2px; margin-right: -10px; flex-shrink: 0; }
 .acct-right {
   display: grid; grid-template-columns: 1fr 1fr;
   padding: 0; overflow: hidden;
 }
-.acct-stat { padding: 18px 20px; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
-.acct-stat + .acct-stat { border-left: 1px solid var(--border-subtle); }
+.acct-stat { margin: 0; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+.acct-stat .acct-label { justify-content: space-between; }
 .acct-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
 .acct-speed {
-  margin: 10px 0 4px; font-size: 24px; font-weight: 700; color: var(--text-primary);
+  margin: 8px 0 4px; font-size: 22px; font-weight: 700; color: var(--text-primary);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .acct-up { color: #3b9ced; }
@@ -1632,3 +1633,5 @@ select.win11-input option {
 .acct-action-sub { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .acct-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 4px; }
 .acct-logout-text:hover:not(:disabled) { color: #e5534b; background: rgba(229, 83, 75, 0.12); }
+
+.acct-icon-btn { width: 32px; height: 32px; padding: 0; justify-content: center; }

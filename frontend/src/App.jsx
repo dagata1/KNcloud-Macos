@@ -1060,14 +1060,14 @@ export default function App() {
         <ArrowUpRight size={14} />
         <div>
           <div className="speed-val">{status.upSpeed}</div>
-          <div className="speed-total">累计 {status.totalUp}</div>
+          <div className="speed-total">本地累计 {status.totalUp}</div>
         </div>
       </div>
       <div className="speed-stat down">
         <ArrowDownLeft size={14} />
         <div>
           <div className="speed-val">{status.downSpeed}</div>
-          <div className="speed-total">累计 {status.totalDown}</div>
+          <div className="speed-total">本地累计 {status.totalDown}</div>
         </div>
       </div>
     </div>
@@ -1178,9 +1178,32 @@ export default function App() {
               {account && account.loggedIn && (
                 <div className="acct-split">
                   <div className="win11-card account-card acct-left">
+                    <div className="acct-head">
                     <div className="acct-id">
                       <span className="acct-email">{account.email}</span>
                       <span className="acct-plan">{account.planName || 'KNcloud 会员'}</span>
+                    </div>
+                    <div className="acct-actions">
+                      <button
+                        type="button"
+                        className="acct-action acct-icon-btn"
+                        onClick={handleUpdateSubscription}
+                        disabled={syncing}
+                        title={syncing ? '更新中…' : `更新订阅${subscriptions[0] ? '（上次同步 ' + subscriptions[0].updatedAt + '）' : ''}`}
+                        aria-label="更新订阅"
+                      >
+                        <RefreshCw size={15} className={syncing ? 'spin' : ''} />
+                      </button>
+                      <button
+                        type="button"
+                        className="acct-action acct-icon-btn acct-logout-text"
+                        onClick={handleLogout}
+                        title="退出登录"
+                        aria-label="退出登录"
+                      >
+                        <LogOut size={15} />
+                      </button>
+                    </div>
                     </div>
                     <div className="acct-usage">
                       <div className="acct-value">
@@ -1195,40 +1218,16 @@ export default function App() {
                         }} />
                       </div>
                     </div>
-                    <div className="acct-actions">
-                      <button
-                        type="button"
-                        className="acct-action"
-                        onClick={handleUpdateSubscription}
-                        disabled={syncing}
-                        title="刷新套餐与流量，并同步最新节点（也会按设置自动更新）"
-                      >
-                        <RefreshCw size={14} className={syncing ? 'spin' : ''} />
-                        <span className="acct-action-text">
-                          {syncing ? '更新中…' : '更新订阅'}
-                          {subscriptions[0] && !syncing && (
-                            <span className="acct-action-sub">{String(subscriptions[0].updatedAt || '').slice(5, 16)}</span>
-                          )}
-                        </span>
-                      </button>
-                      <span className="acct-divider" aria-hidden="true" />
-                      <button type="button" className="acct-action acct-logout-text" onClick={handleLogout}>
-                        <LogOut size={14} />
-                        <span>退出登录</span>
-                      </button>
-                    </div>
                   </div>
-                  <div className="win11-card acct-right" title="仅统计经代理节点的流量">
-                    <div className="acct-stat">
-                      <div className="acct-label"><ArrowUpRight size={14} className="acct-up" />上传</div>
-                      <div className="acct-speed">{status.upSpeed}</div>
-                      <div className="acct-sub">累计 {status.totalUp}</div>
-                    </div>
-                    <div className="acct-stat">
-                      <div className="acct-label"><ArrowDownLeft size={14} className="acct-down" />下载</div>
-                      <div className="acct-speed">{status.downSpeed}</div>
-                      <div className="acct-sub">累计 {status.totalDown}</div>
-                    </div>
+                  <div className="win11-card acct-stat" title="仅统计经代理节点的流量">
+                    <div className="acct-label"><span>实时上传</span><ArrowUpRight size={16} color="#0078d4" /></div>
+                    <div className="acct-speed">{status.upSpeed}</div>
+                    <div className="acct-sub">本地累计上行: {status.totalUp}</div>
+                  </div>
+                  <div className="win11-card acct-stat" title="仅统计经代理节点的流量">
+                    <div className="acct-label"><span>实时下载</span><ArrowDownLeft size={16} color="#107c41" /></div>
+                    <div className="acct-speed">{status.downSpeed}</div>
+                    <div className="acct-sub">本地累计下行: {status.totalDown}</div>
                   </div>
                 </div>
               )}
