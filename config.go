@@ -30,6 +30,8 @@ type persistedConfig struct {
 	// SubscriptionItem.URL 带 json:"-"（不下发前端），不会随上面的
 	// Subscriptions 一起序列化，必须在这里单独存取。
 	SubscriptionURLs map[string]string `json:"subscriptionUrls,omitempty"`
+	// SubLastUpdate 上次成功更新订阅的时间（Unix 秒）。持久化后每周更新的计时跨重启有效。
+	SubLastUpdate int64 `json:"subLastUpdate,omitempty"`
 }
 
 func appConfigDir() (string, error) {
@@ -94,6 +96,7 @@ func (a *App) loadPersisted() bool {
 		a.routingMode = cfg.RoutingMode
 	}
 	a.activeNodeID = cfg.ActiveNodeID
+	a.subLastAuto.Store(cfg.SubLastUpdate)
 	// 旧口径（入站计数 / TUN 网卡计数）累计的数字含直连流量、方向也可能反了，直接作废
 	if cfg.StatsVersion >= trafficStatsVersion && (cfg.TotalUp > 0 || cfg.TotalDown > 0) {
 		a.traffic.setTotals(cfg.TotalUp, cfg.TotalDown)
@@ -205,6 +208,7 @@ func (a *App) savePersisted() {
 		ActiveNodeID:  a.activeNodeID,
 		StatsVersion:  trafficStatsVersion,
 		Account:       &a.account,
+		SubLastUpdate: a.subLastAuto.Load(),
 	}
 	// 凭证加密后落盘。加密失败时宁可不写：安全功能必须 fail-closed，
 	// 退回明文等于这道防护从未存在。代价只是下次启动需重新登录。

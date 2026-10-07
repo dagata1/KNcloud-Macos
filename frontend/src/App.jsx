@@ -1791,20 +1791,16 @@ export default function App() {
                   <div>
                     <div style={{ fontSize: '13px', fontWeight: 500 }}>自动更新订阅</div>
                     <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                      登录官网账户后，按间隔自动刷新套餐流量并同步最新节点
+                      登录官网账户后，每周自动刷新套餐流量并同步最新节点
                     </div>
                   </div>
                   <select
                     className="win11-input"
                     style={{ width: '140px' }}
-                    value={settings.subUpdateHours || 0}
+                    value={(settings.subUpdateHours || 0) < 0 ? -1 : 0}
                     onChange={e => setLocalSettings({ ...settings, subUpdateHours: parseInt(e.target.value, 10) })}
                   >
-                    <option value={1}>每 1 小时</option>
-                    <option value={3}>每 3 小时</option>
-                    <option value={0}>每 6 小时（默认）</option>
-                    <option value={12}>每 12 小时</option>
-                    <option value={24}>每 24 小时</option>
+                    <option value={0}>每周（默认）</option>
                     <option value={-1}>关闭</option>
                   </select>
                 </div>

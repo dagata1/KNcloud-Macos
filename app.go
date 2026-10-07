@@ -99,7 +99,7 @@ type AppSettings struct {
 	// MinimizeToTray 为 true 时，点窗口关闭按钮只收进托盘，程序继续后台运行；
 	// 真正退出需要走托盘菜单的「退出」。
 	MinimizeToTray bool `json:"minimizeToTray"`
-	// SubUpdateHours 自动更新订阅间隔（小时）：0 = 默认（6 小时），-1 = 关闭。
+	// SubUpdateHours 自动更新订阅：-1 = 关闭，其余（含旧版本的 1/3/6/12/24）= 每周一次。
 	SubUpdateHours int `json:"subUpdateHours"`
 }
 
@@ -271,7 +271,14 @@ func (a *App) startup(ctx context.Context) {
 		subID := a.account.SubID
 		a.mu.RUnlock()
 		synced := false
-		if loggedIn && subID != "" {
+		// 每周才更新一次订阅：启动时只在距上次更新已满一周（或从未更新过）时同步
+		a.mu.RLock()
+		interval := subUpdateInterval(a.settings.SubUpdateHours)
+		a.mu.RUnlock()
+		last := a.subLastAuto.Load()
+		startupDue := interval > 0 && (last <= 0 || time.Since(time.Unix(last, 0)) >= interval)
+		if loggedIn && subID != "" && startupDue {
+			a.weeklyResolveDomain(time.Now())
 			if err := a.refreshSubscription(subID); err == nil {
 				synced = true // refreshSubscription 成功时已触发自动测速
 				// 同步完成后通知前端刷新，避免前端停留在「无节点 / 连接失败」状态

@@ -9,11 +9,12 @@ func TestSubUpdateInterval(t *testing.T) {
 	if subUpdateInterval(-1) != 0 {
 		t.Fatal("-1 should disable")
 	}
-	if subUpdateInterval(0) != 6*time.Hour {
-		t.Fatal("0 should default to 6h")
+	week := 7 * 24 * time.Hour
+	if subUpdateInterval(0) != week {
+		t.Fatal("0 should be weekly")
 	}
-	if subUpdateInterval(12) != 12*time.Hour {
-		t.Fatal("12h")
+	if subUpdateInterval(12) != week || subUpdateInterval(6) != week {
+		t.Fatal("legacy hour values should be weekly")
 	}
 }
 
