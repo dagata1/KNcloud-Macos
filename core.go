@@ -395,21 +395,15 @@ func (a *App) startCoreLocked() error {
 		a.bridgeAddr = bridge.addr
 	}
 
-	cfgJSON, err := a.buildCoreConfigJSON(*node)
+	coreCfg, err := a.buildCoreConfigLocked(*node)
 	if err != nil {
 		a.stopBridgeLocked()
 		return err
 	}
-
-	pbCfg, err := serial.DecodeJSONConfig(bytes.NewReader([]byte(cfgJSON)))
-	if err != nil {
+	// 用可热替换的 router，运行中切换分流策略无需重启内核（见 routerswap.go）
+	if err := useSwappableRouter(coreCfg); err != nil {
 		a.stopBridgeLocked()
-		return fmt.Errorf("failed to parse core config: %w", err)
-	}
-	coreCfg, err := pbCfg.Build()
-	if err != nil {
-		a.stopBridgeLocked()
-		return fmt.Errorf("failed to build core config: %w", err)
+		return fmt.Errorf("failed to prepare routing: %w", err)
 	}
 	inst, err := xcore.New(coreCfg)
 	if err != nil {
@@ -428,11 +422,31 @@ func (a *App) startCoreLocked() error {
 	return nil
 }
 
+// buildCoreConfigLocked 生成并构建 node 对应的完整内核配置（调用方需持有锁）。
+func (a *App) buildCoreConfigLocked(node NodeItem) (*xcore.Config, error) {
+	cfgJSON, err := a.buildCoreConfigJSON(node)
+	if err != nil {
+		return nil, err
+	}
+	pbCfg, err := serial.DecodeJSONConfig(bytes.NewReader([]byte(cfgJSON)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse core config: %w", err)
+	}
+	coreCfg, err := pbCfg.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build core config: %w", err)
+	}
+	return coreCfg, nil
+}
+
 // stopCoreLocked 停止内核（调用方需持有写锁）
 func (a *App) stopCoreLocked() {
 	if a.xrayInst != nil {
 		a.xrayInst.Close()
-		outboundConnTracker.Forget(a.xrayInst)
+		// 关实例不会断开已接入的连接，残留隧道会继续按旧配置出站，这里一并切断。
+		if n := outboundConnTracker.Retire(a.xrayInst); n > 0 {
+			a.addLogInternal("info", fmt.Sprintf("Closed %d connection(s) left on the stopped core", n))
+		}
 		a.xrayInst = nil
 	}
 	a.coreNodeID = ""
@@ -754,4 +768,61 @@ func (a *App) hotSwapProxyOutboundLocked(node NodeItem) error {
 		return err
 	}
 	return a.commitProxyOutboundLocked(p)
+}
+
+// ------------------------- 分流策略热切换 -------------------------
+
+// proxyUsesMux 与 buildProxyOutbound 的判断保持一致：该节点的 proxy 出站是否启用 mux。
+func proxyUsesMux(node NodeItem, muxEnabled bool) bool {
+	return muxEnabled && (node.Protocol == "VLESS" || node.Protocol == "VMess" || node.Protocol == "Trojan")
+}
+
+// applyRoutingLocked 按当前 a.routingMode 就地替换运行中内核的路由规则，并切断
+// 按旧策略建立的存量连接（调用方需持有写锁）。返回 errHotSwapUnavailable（可能被包装）
+// 时调用方应回退为整体重启内核。
+//
+// 时序：先换规则，再推进代际并清扫。此后开始的拨号都已按新规则路由；
+// 换规则与推进代际之间按新规则拨出的少量连接会被误关，客户端重连即可，无害。
+//
+// 仅 DNS 配置（直连模式换国内 DNS）不随之替换：系统代理路径下 Xray 内置 DNS 没有使用者
+// （路由 domainStrategy=AsIs、freedom 与传输层均不经它解析），TUN 运行时本函数不会被调用。
+func (a *App) applyRoutingLocked() error {
+	inst := a.xrayInst
+	sr := swappableRouterOf(inst)
+	if sr == nil {
+		return errHotSwapUnavailable
+	}
+	var node *NodeItem
+	for i := range a.nodes {
+		if a.nodes[i].Active {
+			node = &a.nodes[i]
+			break
+		}
+	}
+	if node == nil || node.ID != a.coreNodeID {
+		return errHotSwapUnavailable
+	}
+	coreCfg, err := a.buildCoreConfigLocked(*node)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errHotSwapUnavailable, err)
+	}
+	rc, err := routerConfigOf(coreCfg)
+	if err != nil || rc == nil {
+		return fmt.Errorf("%w: no routing config (%v)", errHotSwapUnavailable, err)
+	}
+	if err := sr.Reload(rc); err != nil {
+		return fmt.Errorf("%w: reload routing: %v", errHotSwapUnavailable, err)
+	}
+	// mux 出站上的子连接不经系统拨号器，记账看不到；换一个同节点的新 handler
+	// 关掉旧 handler 释放其 mux 连接（与换节点同一套流程）。
+	if proxyUsesMux(*node, a.settings.MuxEnabled) {
+		if err := a.hotSwapProxyOutboundLocked(*node); err != nil {
+			return fmt.Errorf("%w: refresh proxy outbound: %v", errHotSwapUnavailable, err)
+		}
+	}
+	cut := outboundConnTracker.Advance()
+	if n := outboundConnTracker.CloseAllBefore(inst, cut); n > 0 {
+		a.addLogInternal("info", fmt.Sprintf("Closed %d connection(s) routed by the previous policy", n))
+	}
+	return nil
 }

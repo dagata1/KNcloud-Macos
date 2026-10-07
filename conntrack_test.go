@@ -329,13 +329,6 @@ func TestTrackerIgnoresOtherTagsAndUDP(t *testing.T) {
 	fd := &fakeDialer{}
 	tr := newTestTracker(fd)
 
-	c, err := tr.Dial(trackerCtx(inst, "direct"), nil, xnet.TCPDestination(xnet.LocalHostIP, 1), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, wrapped := c.(*trackedConn); wrapped {
-		t.Fatal("direct 出站的连接不应被包装 / 追踪")
-	}
 	u, err := tr.Dial(trackerCtx(inst, proxyOutboundTag), nil, xnet.UDPDestination(xnet.LocalHostIP, 1), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -343,7 +336,7 @@ func TestTrackerIgnoresOtherTagsAndUDP(t *testing.T) {
 	if _, wrapped := u.(*trackedConn); wrapped {
 		t.Fatal("UDP 连接不应被包装（quic/splithttp 依赖原始类型）")
 	}
-	// 没有实例信息的拨号（如 mux worker 自建的 ctx）也不追踪。
+	// 没有实例信息的拨号也不追踪。
 	n, err := tr.Dial(session.ContextWithOutbounds(context.Background(), []*session.Outbound{{Tag: proxyOutboundTag}}),
 		nil, xnet.TCPDestination(xnet.LocalHostIP, 1), nil)
 	if err != nil {
@@ -352,7 +345,77 @@ func TestTrackerIgnoresOtherTagsAndUDP(t *testing.T) {
 	if _, wrapped := n.(*trackedConn); wrapped {
 		t.Fatal("ctx 中没有实例时不应追踪")
 	}
-	if tr.count(inst) != 0 {
+	// 没有出站 tag 的拨号（mux worker 拨出的底层连接）不追踪。
+	m, err := tr.Dial(trackerCtx(inst, ""), nil, xnet.TCPDestination(xnet.LocalHostIP, 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, wrapped := m.(*trackedConn); wrapped {
+		t.Fatal("无 tag 的拨号不应追踪")
+	}
+	if tr.countTag(inst, "") != 0 {
 		t.Fatal("以上连接都不应计入")
 	}
+}
+
+// TestTrackerProxySweepKeepsDirect 换节点（CloseBefore）只清 proxy 出站；
+// 换策略（CloseAllBefore）连 direct 一起清，且之后才拨通的旧代际 direct 连接也被拒。
+func TestTrackerProxySweepKeepsDirect(t *testing.T) {
+	inst, _ := newSocksCore(t)
+	fd := &fakeDialer{}
+	tr := newTestTracker(fd)
+	dest := xnet.TCPDestination(xnet.LocalHostIP, 1)
+
+	d, err := tr.Dial(trackerCtx(inst, "direct"), nil, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, wrapped := d.(*trackedConn); !wrapped {
+		t.Fatal("direct 出站的 TCP 连接应被追踪（换策略时要切断）")
+	}
+	p, err := tr.Dial(trackerCtx(inst, proxyOutboundTag), nil, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.count(inst) != 1 || tr.countTag(inst, "direct") != 1 {
+		t.Fatalf("记账不对: proxy=%d direct=%d", tr.count(inst), tr.countTag(inst, "direct"))
+	}
+
+	if n := tr.CloseBefore(inst, tr.Advance()); n != 1 {
+		t.Fatalf("换节点应只关 proxy 连接，关了 %d 条", n)
+	}
+	if _, err := p.Write([]byte("x")); err == nil {
+		t.Fatal("proxy 连接应已关闭")
+	}
+	if tr.countTag(inst, "direct") != 1 {
+		t.Fatal("换节点不应关闭 direct 连接")
+	}
+
+	// 慢拨号：切换前开始、切换后才拨通的 direct 连接应被拒。
+	slow := &fakeDialer{release: make(chan struct{})}
+	tr2 := newTestTracker(slow)
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr2.Dial(trackerCtx(inst, "direct"), nil, dest, nil)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	tr2.CloseAllBefore(inst, tr2.Advance())
+	close(slow.release)
+	if err := <-done; err == nil {
+		t.Fatal("旧代际的 direct 拨号在换策略后拨通，应被拒")
+	}
+
+	if n := tr.CloseAllBefore(inst, tr.Advance()); n != 1 {
+		t.Fatalf("换策略应关闭剩余的 direct 连接，关了 %d 条", n)
+	}
+	if tr.countTag(inst, "") != 0 {
+		t.Fatal("清扫后不应再有记账")
+	}
+	// 新代际拨号不受影响。
+	c, err := tr.Dial(trackerCtx(inst, "direct"), nil, dest, nil)
+	if err != nil {
+		t.Fatalf("新代际拨号应成功: %v", err)
+	}
+	c.Close()
 }

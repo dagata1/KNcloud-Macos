@@ -29,6 +29,10 @@ import (
 // 加上 ctx 中的 *core.Instance —— 测速用的临时实例同样叫 proxy，但实例不同，不会被误杀。
 // 新旧 handler 的 tag 相同，只能靠代际区分（见 commitProxyOutboundLocked 的时序）。
 //
+// 切换分流策略时（见 routerswap.go）同样按代际清扫，但要关掉的不止 proxy 出站：
+// 原先直连的 keep-alive 隧道在「全局」下也必须改走节点，所以 direct 等出站的连接
+// 一并记账（trackedConn.tag 区分），CloseAllBefore 不分 tag 清扫；换节点仍只清 proxy。
+//
 // 只包装 TCP：UDP 拨号返回的 *internet.PacketConnWrapper 会被 quic/splithttp 传输层做类型断言，
 // 包一层会破坏它们；UDP 会话本身有空闲超时，不做追踪。mux 底层连接的拨号 ctx 不带 tag，
 // 由关闭旧 handler（释放其 mux worker）负责切断。
@@ -43,13 +47,20 @@ func init() {
 
 type connTracker struct {
 	base   internet.SystemDialer
-	tag    string // 只追踪此 tag 的出站连接
+	tag    string // proxy 出站的 tag：CloseBefore（换节点）只清扫它
 	instOf func(context.Context) *xcore.Instance
 	mu     sync.Mutex
 	gen    uint64
 	nextID uint64
 	conns  map[uint64]*trackedConn
-	swept  map[*xcore.Instance]uint64 // 每个实例已清扫到的代际（不含）
+	swept  map[*xcore.Instance]sweepCut // 每个实例已清扫到的代际（不含）
+}
+
+// sweepCut 记录一个实例的两类清扫线：proxy 只针对 proxy 出站（换节点），
+// all 针对全部出站（换分流策略 / 停内核）。
+type sweepCut struct {
+	proxy uint64
+	all   uint64
 }
 
 func newConnTracker(base internet.SystemDialer, tag string) *connTracker {
@@ -73,13 +84,14 @@ func (t *connTracker) Dial(ctx context.Context, src xnet.Address, dest xnet.Dest
 		tag = obs[len(obs)-1].Tag
 	}
 	inst := t.instOf(ctx)
-	if tag != t.tag || inst == nil {
+	// 无 tag 的拨号（mux worker 自建 ctx 拨出的底层连接）不追踪：它由关闭旧 handler 切断。
+	if tag == "" || inst == nil {
 		return conn, nil
 	}
 
-	tc := &trackedConn{Conn: conn, tracker: t, inst: inst, gen: gen}
+	tc := &trackedConn{Conn: conn, tracker: t, inst: inst, gen: gen, tag: tag}
 	t.mu.Lock()
-	if t.isSweptLocked(inst, gen) {
+	if t.isSweptLocked(inst, tag, gen) {
 		t.mu.Unlock()
 		conn.Close()
 		return nil, errors.New("outbound switched while dialing")
@@ -98,9 +110,9 @@ func (t *connTracker) DestIpAddress() net.IP {
 
 // isSweptLocked 判断 inst 上代际 gen 的连接是否已被清扫。实例数量极少
 // （只有主内核启动才会产生新实例），且实例关闭时由 Forget 清理。
-func (t *connTracker) isSweptLocked(inst *xcore.Instance, gen uint64) bool {
+func (t *connTracker) isSweptLocked(inst *xcore.Instance, tag string, gen uint64) bool {
 	cut, ok := t.swept[inst]
-	return ok && gen < cut
+	return ok && (gen < cut.all || (tag == t.tag && gen < cut.proxy))
 }
 
 // Advance 推进代际并返回新的代际号。之后开始的拨号都属于新代际。
@@ -111,19 +123,33 @@ func (t *connTracker) Advance() uint64 {
 	return t.gen
 }
 
-// CloseBefore 关闭 inst 上所有代际号小于 gen 的已追踪连接，并让此后才拨通的
-// 旧代际连接一拨通就被关闭。返回关闭的连接数。
+// CloseBefore 关闭 inst 上 proxy 出站所有代际号小于 gen 的已追踪连接（换节点用），
+// 并让此后才拨通的旧代际连接一拨通就被关闭。返回关闭的连接数。
 func (t *connTracker) CloseBefore(inst *xcore.Instance, gen uint64) int {
+	return t.closeBefore(inst, gen, false)
+}
+
+// CloseAllBefore 同 CloseBefore，但不分出站 tag（换分流策略 / 停内核用）。
+func (t *connTracker) CloseAllBefore(inst *xcore.Instance, gen uint64) int {
+	return t.closeBefore(inst, gen, true)
+}
+
+func (t *connTracker) closeBefore(inst *xcore.Instance, gen uint64, all bool) int {
 	t.mu.Lock()
 	if t.swept == nil {
-		t.swept = make(map[*xcore.Instance]uint64)
+		t.swept = make(map[*xcore.Instance]sweepCut)
 	}
-	if gen > t.swept[inst] {
-		t.swept[inst] = gen
+	cut := t.swept[inst]
+	if all && gen > cut.all {
+		cut.all = gen
 	}
+	if gen > cut.proxy {
+		cut.proxy = gen
+	}
+	t.swept[inst] = cut
 	var victims []*trackedConn
 	for id, c := range t.conns {
-		if c.inst == inst && c.gen < gen {
+		if c.inst == inst && c.gen < gen && (all || c.tag == t.tag) {
 			victims = append(victims, c)
 			delete(t.conns, id)
 		}
@@ -134,6 +160,15 @@ func (t *connTracker) CloseBefore(inst *xcore.Instance, gen uint64) int {
 		c.Conn.Close()
 	}
 	return len(victims)
+}
+
+// Retire 在实例关闭后调用：关掉它残留的全部出站连接并丢弃记账。
+// Xray 关闭实例只关监听，已接入的隧道仍会挂在旧实例上按旧配置转发，
+// 不切断的话「停止代理 / 重启内核」后 keep-alive 客户端仍走旧出口。
+func (t *connTracker) Retire(inst *xcore.Instance) int {
+	n := t.CloseAllBefore(inst, t.Advance())
+	t.Forget(inst)
+	return n
 }
 
 // Forget 在实例关闭后丢弃它的记账（连接已随实例关闭）。
@@ -148,13 +183,18 @@ func (t *connTracker) Forget(inst *xcore.Instance) {
 	}
 }
 
-// count 返回 inst 上仍在追踪的连接数（测试用）。
+// count 返回 inst 上 proxy 出站仍在追踪的连接数（测试用）。
 func (t *connTracker) count(inst *xcore.Instance) int {
+	return t.countTag(inst, t.tag)
+}
+
+// countTag 返回 inst 上指定 tag（空串表示全部）仍在追踪的连接数（测试用）。
+func (t *connTracker) countTag(inst *xcore.Instance, tag string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := 0
 	for _, c := range t.conns {
-		if c.inst == inst {
+		if c.inst == inst && (tag == "" || c.tag == tag) {
 			n++
 		}
 	}
@@ -173,6 +213,7 @@ type trackedConn struct {
 	tracker *connTracker
 	inst    *xcore.Instance
 	gen     uint64
+	tag     string
 	id      uint64
 	once    sync.Once
 }

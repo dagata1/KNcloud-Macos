@@ -883,7 +883,14 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 	a.addLogInternal("info", fmt.Sprintf("Routing mode changed to: %s", modeLabel))
 
 	if a.coreRunning {
-		if err := a.startCoreLocked(); err != nil {
+		// 优先就地替换路由规则并切断旧连接（入站不断、keep-alive 连接立即按新策略出站）；
+		// 不可用时才整体重启内核。
+		err := a.applyRoutingLocked()
+		if err != nil && errors.Is(err, errHotSwapUnavailable) {
+			a.addLogInternal("warn", fmt.Sprintf("Live routing switch unavailable (%v), restarting core", err))
+			err = a.startCoreLocked()
+		}
+		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after routing change: %v", err))
 			a.coreRunning = false
 			a.savePersisted()
