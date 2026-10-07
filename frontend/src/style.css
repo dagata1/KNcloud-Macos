@@ -1582,12 +1582,9 @@ select.win11-input option {
   flex-shrink: 0;
 }
 
-/* ---------- 订阅卡（账户 + 流量 + 实时速率一体） ---------- */
-.acct { padding: 0; overflow: hidden; }
-.acct-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  padding: 16px 20px;
-}
+/* ---------- 订阅卡：左半账户/流量/操作，右半实时速率 ---------- */
+.acct { padding: 0; overflow: hidden; display: grid; grid-template-columns: 1fr 1fr; }
+.acct-left { padding: 18px 20px 12px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .acct-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .acct-email {
   font-size: 15px; font-weight: 600; color: var(--text-primary);
@@ -1597,31 +1594,29 @@ select.win11-input option {
   font-size: 12px; font-weight: 600; color: var(--accent);
   padding: 2px 8px; border-radius: 6px; background: var(--accent-subtle); white-space: nowrap;
 }
-.acct-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.acct-sync { font-size: 11px; color: var(--text-tertiary); margin-right: 6px; white-space: nowrap; }
-.acct-stats {
-  display: grid; grid-template-columns: 1.6fr 1fr 1fr;
-  border-top: 1px solid var(--border-subtle);
+.acct-value {
+  font-size: 18px; font-weight: 700; color: var(--text-primary);
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.acct-value .acct-sub { font-size: 12px; font-weight: 400; }
+.acct-bar { margin-top: 8px; }
+.acct-sub { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
+.acct-actions { display: flex; align-items: center; gap: 2px; margin-left: -10px; }
+.acct-right {
+  display: grid; grid-template-columns: 1fr 1fr;
+  border-left: 1px solid var(--border-subtle);
   background: rgba(127, 127, 127, 0.04);
 }
-.acct-stat { padding: 14px 20px 16px; min-width: 0; }
+.acct-stat { padding: 18px 20px; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 .acct-stat + .acct-stat { border-left: 1px solid var(--border-subtle); }
-.acct-label {
-  display: flex; align-items: center; gap: 5px;
-  font-size: 12px; color: var(--text-secondary); white-space: nowrap;
-}
-.acct-value {
-  margin-top: 6px; font-size: 18px; font-weight: 700; color: var(--text-primary);
+.acct-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.acct-speed {
+  margin: 10px 0 4px; font-size: 24px; font-weight: 700; color: var(--text-primary);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.acct-sub { font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin-top: 2px; white-space: nowrap; }
-.acct-value .acct-sub { font-size: 12px; }
-.acct-bar { margin-top: 10px; }
 .acct-up { color: #3b9ced; }
 .acct-down { color: #2fb36d; }
-
 /* 订阅卡头部操作：无边框幽灵按钮，悬停才显底色，融入卡片 */
-.acct-actions { gap: 2px; }
 .acct-action {
   display: inline-flex; align-items: center; gap: 8px;
   height: 34px; padding: 0 10px;
@@ -1637,5 +1632,4 @@ select.win11-input option {
 .acct-action-text { display: inline-flex; align-items: baseline; gap: 8px; white-space: nowrap; }
 .acct-action-sub { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .acct-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 4px; }
-.acct-logout { width: 34px; padding: 0; justify-content: center; }
-.acct-logout:hover:not(:disabled) { color: #e5534b; background: rgba(229, 83, 75, 0.12); }
+.acct-logout-text:hover:not(:disabled) { color: #e5534b; background: rgba(229, 83, 75, 0.12); }

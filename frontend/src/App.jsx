@@ -148,7 +148,8 @@ export default function App() {
     muxEnabled: true,
     coreType: 'Xray-core',
     dnsServers: '1.1.1.1, 8.8.8.8, 223.5.5.5',
-    minimizeToTray: true
+    minimizeToTray: true,
+    subUpdateHours: 0
   });
 
   // Modals
@@ -1176,10 +1177,23 @@ export default function App() {
 
               {account && account.loggedIn && (
                 <div className="win11-card account-card acct">
-                  <div className="acct-head">
+                  <div className="acct-left">
                     <div className="acct-id">
                       <span className="acct-email">{account.email}</span>
                       <span className="acct-plan">{account.planName || 'KNcloud 会员'}</span>
+                    </div>
+                    <div className="acct-usage">
+                      <div className="acct-value">
+                        {fmtGB(account.usedUp + account.usedDown)}
+                        <span className="acct-sub"> / {account.transferEnable > 0 ? fmtGB(account.transferEnable) : '无限'} · {account.expire}</span>
+                      </div>
+                      <div className="simple-account-bar acct-bar">
+                        <div style={{
+                          width: account.transferEnable > 0
+                            ? Math.min(100, Math.max(1, Math.round((account.usedUp + account.usedDown) * 100 / account.transferEnable))) + '%'
+                            : '0%'
+                        }} />
+                      </div>
                     </div>
                     <div className="acct-actions">
                       <button
@@ -1187,7 +1201,7 @@ export default function App() {
                         className="acct-action"
                         onClick={handleUpdateSubscription}
                         disabled={syncing}
-                        title="刷新套餐与流量，并同步最新节点"
+                        title="刷新套餐与流量，并同步最新节点（也会按设置自动更新）"
                       >
                         <RefreshCw size={14} className={syncing ? 'spin' : ''} />
                         <span className="acct-action-text">
@@ -1198,40 +1212,21 @@ export default function App() {
                         </span>
                       </button>
                       <span className="acct-divider" aria-hidden="true" />
-                      <button
-                        type="button"
-                        className="acct-action acct-logout"
-                        onClick={handleLogout}
-                        title="退出登录"
-                        aria-label="退出登录"
-                      >
+                      <button type="button" className="acct-action acct-logout-text" onClick={handleLogout}>
                         <LogOut size={14} />
+                        <span>退出登录</span>
                       </button>
                     </div>
                   </div>
-                  <div className="acct-stats">
-                    <div className="acct-stat acct-usage">
-                      <div className="acct-label">流量 · {account.expire}</div>
-                      <div className="acct-value">
-                        {fmtGB(account.usedUp + account.usedDown)}
-                        <span className="acct-sub"> / {account.transferEnable > 0 ? fmtGB(account.transferEnable) : '无限'}</span>
-                      </div>
-                      <div className="simple-account-bar acct-bar">
-                        <div style={{
-                          width: account.transferEnable > 0
-                            ? Math.min(100, Math.max(1, Math.round((account.usedUp + account.usedDown) * 100 / account.transferEnable))) + '%'
-                            : '0%'
-                        }} />
-                      </div>
-                    </div>
-                    <div className="acct-stat" title="仅统计经代理节点的流量">
-                      <div className="acct-label"><ArrowUpRight size={13} className="acct-up" />上传</div>
-                      <div className="acct-value">{status.upSpeed}</div>
+                  <div className="acct-right" title="仅统计经代理节点的流量">
+                    <div className="acct-stat">
+                      <div className="acct-label"><ArrowUpRight size={14} className="acct-up" />上传</div>
+                      <div className="acct-speed">{status.upSpeed}</div>
                       <div className="acct-sub">累计 {status.totalUp}</div>
                     </div>
-                    <div className="acct-stat" title="仅统计经代理节点的流量">
-                      <div className="acct-label"><ArrowDownLeft size={13} className="acct-down" />下载</div>
-                      <div className="acct-value">{status.downSpeed}</div>
+                    <div className="acct-stat">
+                      <div className="acct-label"><ArrowDownLeft size={14} className="acct-down" />下载</div>
+                      <div className="acct-speed">{status.downSpeed}</div>
                       <div className="acct-sub">累计 {status.totalDown}</div>
                     </div>
                   </div>
@@ -1792,6 +1787,27 @@ export default function App() {
                     />
                     <span className="toggle-track"><span className="toggle-thumb" /></span>
                   </label>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>自动更新订阅</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      登录官网账户后，按间隔自动刷新套餐流量并同步最新节点
+                    </div>
+                  </div>
+                  <select
+                    className="win11-input"
+                    style={{ width: '140px' }}
+                    value={settings.subUpdateHours || 0}
+                    onChange={e => setLocalSettings({ ...settings, subUpdateHours: parseInt(e.target.value, 10) })}
+                  >
+                    <option value={1}>每 1 小时</option>
+                    <option value={3}>每 3 小时</option>
+                    <option value={0}>每 6 小时（默认）</option>
+                    <option value={12}>每 12 小时</option>
+                    <option value={24}>每 24 小时</option>
+                    <option value={-1}>关闭</option>
+                  </select>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>

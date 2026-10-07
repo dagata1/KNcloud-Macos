@@ -99,6 +99,8 @@ type AppSettings struct {
 	// MinimizeToTray 为 true 时，点窗口关闭按钮只收进托盘，程序继续后台运行；
 	// 真正退出需要走托盘菜单的「退出」。
 	MinimizeToTray bool `json:"minimizeToTray"`
+	// SubUpdateHours 自动更新订阅间隔（小时）：0 = 默认（6 小时），-1 = 关闭。
+	SubUpdateHours int `json:"subUpdateHours"`
 }
 
 type App struct {
@@ -117,6 +119,7 @@ type App struct {
 	traffic           trafficMeter               // 经代理节点的流量统计（独立锁，见 traffic.go）
 	statsInst         statsInstHolder            // 当前内核实例（采样协程无锁读取）
 	traySubUpdating   atomic.Bool                // 托盘「更新订阅」进行中
+	subLastAuto       atomic.Int64               // 上次成功更新订阅的 Unix 时间（自动更新判定用）
 	statusCache       atomic.Pointer[CoreStatus] // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
 	xrayInst          *xcore.Instance
 	coreNodeID        string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
@@ -256,6 +259,9 @@ func (a *App) startup(ctx context.Context) {
 			}
 		}
 	}()
+
+	// 定时自动更新订阅（套餐/流量 + 节点），间隔见设置 subUpdateHours
+	go a.subAutoUpdateLoop()
 
 	// 登录过官网账户：启动时自动同步订阅节点
 	go func() {
@@ -1008,6 +1014,7 @@ func (a *App) refreshSubscription(id string) error {
 			a.subscriptions[i].UpdatedAt = time.Now().Format("2006-01-02 15:04")
 		}
 	}
+	a.subLastAuto.Store(time.Now().Unix())
 
 	// 检查当前活动节点是否属于该订阅，并记录其特征以便在新列表中保持选择
 	activeWasHere := false
