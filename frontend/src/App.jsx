@@ -38,7 +38,8 @@ import {
   SlidersHorizontal,
   FolderInput,
   LoaderCircle,
-  Gauge
+  Gauge,
+  LogOut,
 } from 'lucide-react';
 
 import {
@@ -1181,15 +1182,30 @@ export default function App() {
                       <span className="acct-plan">{account.planName || 'KNcloud 会员'}</span>
                     </div>
                     <div className="acct-actions">
-                      {subscriptions[0] && (
-                        <span className="acct-sync">上次同步 {subscriptions[0].updatedAt}</span>
-                      )}
-                      <button className="win11-btn" onClick={handleUpdateSubscription} disabled={syncing}>
-                        <RefreshCw size={13} className={syncing ? 'spin' : ''} />
-                        <span>{syncing ? '更新中...' : '更新订阅'}</span>
+                      <button
+                        type="button"
+                        className="acct-action"
+                        onClick={handleUpdateSubscription}
+                        disabled={syncing}
+                        title="刷新套餐与流量，并同步最新节点"
+                      >
+                        <RefreshCw size={14} className={syncing ? 'spin' : ''} />
+                        <span className="acct-action-text">
+                          {syncing ? '更新中…' : '更新订阅'}
+                          {subscriptions[0] && !syncing && (
+                            <span className="acct-action-sub">{String(subscriptions[0].updatedAt || '').slice(5, 16)}</span>
+                          )}
+                        </span>
                       </button>
-                      <button className="win11-btn danger" onClick={handleLogout}>
-                        <span>退出登录</span>
+                      <span className="acct-divider" aria-hidden="true" />
+                      <button
+                        type="button"
+                        className="acct-action acct-logout"
+                        onClick={handleLogout}
+                        title="退出登录"
+                        aria-label="退出登录"
+                      >
+                        <LogOut size={14} />
                       </button>
                     </div>
                   </div>
