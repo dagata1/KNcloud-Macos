@@ -21,7 +21,7 @@ import (
 type NodeItem struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks（Hysteria2 仅解析，Xray 不支持）
+	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks, HTTP, SOCKS（Hysteria2 仅解析，Xray 不支持）
 	Address  string `json:"address"`
 	Port     int    `json:"port"`
 	UUID     string `json:"uuid"`
@@ -45,6 +45,7 @@ type NodeItem struct {
 	HostName    string `json:"hostName,omitempty"`
 	ServiceName string `json:"serviceName,omitempty"`
 	Method      string `json:"method,omitempty"`
+	Username    string `json:"username,omitempty"` // HTTP/SOCKS 代理认证用户名（密码放 UUID）
 	Insecure    bool   `json:"insecure,omitempty"` // 跳过 TLS 证书校验（分享链接里的 insecure=1 / allowInsecure=1）
 }
 

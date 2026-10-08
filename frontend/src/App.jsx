@@ -78,6 +78,8 @@ import {
 } from '../wailsjs/go/main/App';
 import { EventsOn, WindowSetSize, WindowUnmaximise, BrowserOpenURL } from '../wailsjs/runtime';
 
+const protoLabel = (n) => (n.protocol === 'HTTP' && n.security === 'tls') ? 'HTTPS' : n.protocol;
+
 export default function App() {
   // 简易模式内容少，窗口切到紧凑尺寸；普通模式恢复默认大小
   // （全局最小尺寸在 main.go 里放开了到 380x560，这里的目标值在其之上）
@@ -1133,7 +1135,7 @@ export default function App() {
             <button type="button" ref={nodeTriggerRef} className="simple-node-trigger" onClick={toggleNodeMenu}>
               {activeNode ? (
                 <>
-                  <span className={`proto-badge proto-${activeNode.protocol.toLowerCase()}`}>{activeNode.protocol}</span>
+                  <span className={`proto-badge proto-${activeNode.protocol.toLowerCase()}`}>{protoLabel(activeNode)}</span>
                   <span className="simple-node-name">{activeNode.name}</span>
                   <span className="simple-node-delay" style={{ color: delayColor(activeNode.delay) }}>
                     {delayText(activeNode.delay)}
@@ -1162,7 +1164,7 @@ export default function App() {
                         if (!activeNode || n.id !== activeNode.id) handleSimpleSelectNode(n.id);
                       }}
                     >
-                      <span className={`proto-badge proto-${n.protocol.toLowerCase()}`}>{n.protocol}</span>
+                      <span className={`proto-badge proto-${n.protocol.toLowerCase()}`}>{protoLabel(n)}</span>
                       <span className="simple-node-name">{n.name}</span>
                       <span className="simple-node-delay" style={{ color: delayColor(n.delay) }}>
                         {delayText(n.delay)}
@@ -1651,7 +1653,7 @@ export default function App() {
                         }} />
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{node.protocol}</span>
+                            <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{protoLabel(node)}</span>
                             <strong style={{ fontSize: '13px', color: 'var(--text-primary)' }}>{node.name}</strong>
                             {node.active && (
                               <span style={{

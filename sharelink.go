@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
@@ -32,6 +33,10 @@ func ParseShareLink(link string) (NodeItem, error) {
 		return parseShadowsocksLink(link)
 	case strings.HasPrefix(lower, "hysteria2://"), strings.HasPrefix(lower, "hy2://"):
 		return parseUserHostLink(link, "Hysteria2")
+	case strings.HasPrefix(lower, "https://"), strings.HasPrefix(lower, "http://"):
+		return parseProxyLink(link, "HTTP")
+	case strings.HasPrefix(lower, "socks5://"), strings.HasPrefix(lower, "socks://"), strings.HasPrefix(lower, "socks5h://"):
+		return parseProxyLink(link, "SOCKS")
 	case strings.HasPrefix(lower, "anytls://"):
 		// AnyTLS 需要 sing-box 协议桥（Xray 没有该出站），已随 sing-box 一并移除
 		return NodeItem{}, fmt.Errorf("%w: AnyTLS is not supported in this version", errUnsupportedProtocol)
@@ -149,6 +154,62 @@ func parseUserHostLink(link, proto string) (NodeItem, error) {
 	}, nil
 }
 
+// parseProxyLink 解析 http(s)://[user:pass@]host:port[?skip-cert-verify=true&sni=..]#name
+// 和 socks5://[user:pass@]host:port#name（socks:// 兼容 v2rayN 的 base64(user:pass) 写法）。
+// 带路径的 http(s) 链接（例如订阅地址本身）不是代理节点，拒绝解析。
+func parseProxyLink(link, proto string) (NodeItem, error) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return NodeItem{}, fmt.Errorf("link parse failed: %w", err)
+	}
+	if u.Hostname() == "" {
+		return NodeItem{}, fmt.Errorf("missing server address")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return NodeItem{}, fmt.Errorf("not a proxy link (has path)")
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port <= 0 || port > 65535 {
+		return NodeItem{}, fmt.Errorf("invalid port")
+	}
+	q := u.Query()
+	name, _ := url.QueryUnescape(u.Fragment)
+	user := ""
+	pass := ""
+	if u.User != nil {
+		user = u.User.Username()
+		pass, _ = u.User.Password()
+		if _, has := u.User.Password(); !has && user != "" {
+			if dec, err := decodeB64Flexible(user); err == nil && strings.Contains(string(dec), ":") {
+				parts := strings.SplitN(string(dec), ":", 2)
+				user, pass = parts[0], parts[1]
+			}
+		}
+	}
+	security := "none"
+	if strings.EqualFold(u.Scheme, "https") || parseBoolParam(q.Get("tls")) || strings.EqualFold(q.Get("security"), "tls") {
+		security = "tls"
+	}
+	sni := firstNonEmpty(q.Get("sni"), q.Get("peer"), q.Get("servername"))
+	if security == "tls" && sni == "" {
+		sni = u.Hostname()
+	}
+	return NodeItem{
+		Name:     firstNonEmpty(name, u.Hostname()),
+		Protocol: proto,
+		Address:  u.Hostname(),
+		Port:     port,
+		Username: user,
+		UUID:     pass,
+		Security: security,
+		Network:  "tcp",
+		SNI:      sni,
+		FP:       q.Get("fp"),
+		Insecure: parseBoolParam(firstNonEmpty(q.Get("skip-cert-verify"), q.Get("insecure"), q.Get("allowInsecure"))),
+		Delay:    -1,
+	}, nil
+}
+
 // parseBoolParam 分享链接里的布尔参数：1/true/yes/on 都算真，空值算假。
 func parseBoolParam(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
@@ -170,6 +231,10 @@ func parseShadowsocksLink(link string) (NodeItem, error) {
 		userinfo := rest[:at]
 		hostpart := rest[at+1:]
 		if q := strings.Index(hostpart, "?"); q >= 0 {
+			if qs, err := url.ParseQuery(hostpart[q+1:]); err == nil && strings.TrimSpace(qs.Get("plugin")) != "" {
+				// SIP003 插件（simple-obfs / v2ray-plugin 等）Xray 不支持，导入了也连不上
+				return NodeItem{}, fmt.Errorf("%w: Shadowsocks plugin %q is not supported", errUnsupportedProtocol, strings.SplitN(qs.Get("plugin"), ";", 2)[0])
+			}
 			hostpart = hostpart[:q]
 		}
 		decoded, err := decodeB64Flexible(userinfo)
@@ -283,7 +348,7 @@ func skippedLinksLog(skipped map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%d %s", n, proto))
 	}
 	sort.Strings(parts)
-	return "Skipped unsupported link(s): " + strings.Join(parts, ", ") + " (AnyTLS is not supported in this version)"
+	return "Skipped unsupported link(s): " + strings.Join(parts, ", ") + " (AnyTLS and Shadowsocks plugins are not supported)"
 }
 
 // BuildShareLink 将节点转换回标准分享链接（ParseShareLink 的逆操作），用于复制到剪贴板。
@@ -296,6 +361,28 @@ func BuildShareLink(n NodeItem) (string, error) {
 		// SIP002: ss://base64url(method:password)@host:port#name
 		user := base64.RawURLEncoding.EncodeToString([]byte(n.Method + ":" + n.UUID))
 		return fmt.Sprintf("ss://%s@%s:%d#%s", user, n.Address, n.Port, url.QueryEscape(n.Name)), nil
+	case "HTTP", "SOCKS":
+		scheme := "socks5"
+		if n.Protocol == "HTTP" {
+			scheme = "http"
+			if n.Security == "tls" {
+				scheme = "https"
+			}
+		}
+		u := url.URL{Scheme: scheme, Host: net.JoinHostPort(n.Address, strconv.Itoa(n.Port))}
+		if n.Username != "" || n.UUID != "" {
+			u.User = url.UserPassword(n.Username, n.UUID)
+		}
+		q := url.Values{}
+		if n.Security == "tls" && n.SNI != "" && n.SNI != n.Address {
+			q.Set("sni", n.SNI)
+		}
+		if n.Insecure {
+			q.Set("skip-cert-verify", "true")
+		}
+		u.RawQuery = q.Encode()
+		u.Fragment = n.Name
+		return u.String(), nil
 	case "VMess":
 		tls := n.Security
 		if tls != "tls" && tls != "reality" {

@@ -74,9 +74,9 @@ type ruleObj struct {
 // buildCoreConfigJSON 根据当前节点 / 设置 / 路由模式生成 Xray 配置
 func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	switch node.Protocol {
-	case "VLESS", "VMess", "Trojan", "Shadowsocks":
+	case "VLESS", "VMess", "Trojan", "Shadowsocks", "HTTP", "SOCKS":
 	default:
-		return "", fmt.Errorf("Xray core does not support %s (supported: VLESS/VMess/Trojan/Shadowsocks)", node.Protocol)
+		return "", fmt.Errorf("Xray core does not support %s (supported: VLESS/VMess/Trojan/Shadowsocks/HTTP/SOCKS)", node.Protocol)
 	}
 
 	listen := "127.0.0.1"
@@ -235,7 +235,7 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool) (map[string]interface{},
 	case "tls":
 		tls := map[string]interface{}{
 			"serverName":    firstNonEmpty(node.SNI, node.Address),
-			"allowInsecure": false,
+			"allowInsecure": node.Insecure, // 仅当分享链接显式要求（allowInsecure/insecure/skip-cert-verify）
 		}
 		if node.FP != "" {
 			tls["fingerprint"] = node.FP
@@ -309,6 +309,20 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool) (map[string]interface{},
 			"settings":       map[string]interface{}{"servers": []map[string]interface{}{{"address": node.Address, "port": node.Port, "method": method, "password": password}}},
 			"streamSettings": stream,
 		}
+	case "HTTP", "SOCKS":
+		server := map[string]interface{}{"address": node.Address, "port": node.Port}
+		if node.Username != "" || node.UUID != "" {
+			server["users"] = []map[string]interface{}{{"user": node.Username, "pass": node.UUID, "level": 0}}
+		}
+		protocol := "http"
+		if node.Protocol == "SOCKS" {
+			protocol = "socks"
+		}
+		out = map[string]interface{}{
+			"tag": "proxy", "protocol": protocol,
+			"settings":       map[string]interface{}{"servers": []map[string]interface{}{server}},
+			"streamSettings": stream,
+		}
 	default:
 		return nil, fmt.Errorf("Xray core does not support %s", node.Protocol)
 	}
@@ -329,7 +343,7 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool) (map[string]interface{},
 //     sockopt.interface 约束，钉 IP 保证 UDP 也走 /32。SS 没有 SNI/Host，钉 IP 无副作用。
 func (a *App) buildProxyOutboundLocked(node NodeItem) (map[string]interface{}, error) {
 	tun := a.tunEgressIface != ""
-	if tun && node.Protocol == "Shadowsocks" && net.ParseIP(node.Address) == nil {
+	if tun && (node.Protocol == "Shadowsocks" || node.Protocol == "SOCKS") && net.ParseIP(node.Address) == nil {
 		if ips := lookupNodeIPv4sCached(node.Address); len(ips) > 0 {
 			node.Address = ips[0].String()
 		}
