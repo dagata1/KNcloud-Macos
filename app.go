@@ -79,6 +79,12 @@ type CoreStatus struct {
 	TunnelMode      bool   `json:"tunnelMode"`
 	// Busy 为 true 表示有耗时操作（开关 TUN、切换策略）正在进行，其余字段是操作前的快照
 	Busy bool `json:"busy"`
+	// CoreState 内核状态：running 运行中 / stopped 已停止 / retrying 启动失败、自动重试中 / failed 启动失败
+	CoreState string `json:"coreState"`
+	// CoreError 启动失败原因（CoreState 为 retrying/failed 时有值）
+	CoreError string `json:"coreError"`
+	// CorePortError 失败原因是端口被占用：界面提示去「首选项设置」改端口
+	CorePortError bool `json:"corePortError"`
 }
 
 type LogItem struct {
@@ -148,6 +154,13 @@ type App struct {
 	uiCtx          atomic.Value // context.Context：Wails 运行时 ctx 的无锁副本（窗口操作用，见 appCtx）
 	minimizeToTray atomic.Bool  // settings.MinimizeToTray 的无锁镜像（beforeClose 可能跑在 UI 线程，不能等 a.mu）
 	switchGen      atomic.Uint64 // 换节点请求代号：新请求会让仍在排队等锁的旧请求直接放弃（见 SelectNode）
+
+	// 内核启动失败兜底（corefallback.go）。以下字段受 a.mu 保护。
+	coreErr         string        // 最近一次内核启动失败的原因；空表示没有失败
+	corePortErr     bool          // 失败原因是端口被占用（不自动重试，提示用户改端口）
+	coreRetrying    bool          // 正在按退避节奏自动重试
+	sysProxyPending bool          // 内核起不来时暂时撤下了系统代理（或启动时还没来得及开），内核恢复后应重新开启
+	coreRetryGen    atomic.Uint64 // 自动重试代号：换节点 / 开关内核 / 手动重启 / 退出时递增以取消正在等待的重试
 	webLogin          *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
 }
 
@@ -324,10 +337,13 @@ func (a *App) startup(ctx context.Context) {
 		if err := a.startCoreLocked(); err != nil {
 			a.coreRunning = false
 			a.addLogInternal("error", fmt.Sprintf("Auto-start core failed: %v", err))
+			a.sysProxyPending = true // 启动本应开启系统代理：内核恢复后补上
+			a.handleCoreStartFailureLocked(err, true)
 			a.mu.Unlock()
 			return
 		}
 		a.coreRunning = true
+		a.markCoreRunningLocked(false)
 		server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
 		a.mu.Unlock()
 
@@ -436,10 +452,17 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 		a.mu.Unlock()
 		return NodeItem{ID: id}, errSwitchSuperseded
 	}
+	// 换节点取消正在等待的内核自动重试；内核此前启动失败的话，用新节点重新拉起
+	a.coreRetryGen.Add(1)
+	kickCore := !a.coreRunning && !a.tunRunning && (a.coreRetrying || a.coreErr != "")
+	a.coreRetrying = false
 	selected, flushDNS, err := a.selectNodeLocked(id)
 	a.mu.Unlock()
 	if flushDNS {
 		go flushDnsClientCache()
+	}
+	if kickCore && err == nil {
+		go a.RestartCore()
 	}
 	return selected, err
 }
@@ -597,6 +620,7 @@ func (a *App) switchCoreNodeLocked(node NodeItem) error {
 func (a *App) restartCoreLocked() error {
 	if err := a.startCoreLocked(); err != nil {
 		a.coreRunning = false
+		a.noteCoreFailureLocked(err)
 		return fmt.Errorf("restart core: %w", err)
 	}
 	return nil
@@ -697,6 +721,7 @@ func (a *App) UpdateNode(node NodeItem) error {
 	} else if old.Active && a.coreRunning {
 		if err := a.startCoreLocked(); err != nil {
 			a.coreRunning = false
+			a.handleCoreStartFailureLocked(err, true)
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node edit: %v", err))
 		} else {
 			go flushDnsClientCache()
@@ -947,7 +972,23 @@ func (a *App) coreStatusLocked() CoreStatus {
 			break
 		}
 	}
+	coreState := "stopped"
+	switch {
+	case a.coreRunning:
+		coreState = "running"
+	case a.coreRetrying:
+		coreState = "retrying"
+	case a.coreErr != "":
+		coreState = "failed"
+	}
+	coreErr := ""
+	if !a.coreRunning {
+		coreErr = a.coreErr
+	}
 	return CoreStatus{
+		CoreState:       coreState,
+		CoreError:       coreErr,
+		CorePortError:   !a.coreRunning && a.corePortErr,
 		Running:         a.coreRunning || a.tunRunning,
 		CoreType:        a.settings.CoreType,
 		CoreVersion:     xrayCoreVersion(),
@@ -963,18 +1004,22 @@ func (a *App) coreStatusLocked() CoreStatus {
 }
 
 func (a *App) ToggleCore(start bool) (bool, error) {
+	a.coreRetryGen.Add(1) // 用户手动开关内核：取消自动重试
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.coreRetrying = false
 
 	if start {
 		// 合并架构：TUN 运行时内核是代理大脑，本就不应停 —— 直接确保内核在线即可
 		if err := a.startCoreLocked(); err != nil {
 			a.coreRunning = false
 			a.addLogInternal("error", fmt.Sprintf("Core start failed: %v", err))
+			a.noteCoreFailureLocked(err)
 			a.savePersisted()
 			return false, err
 		}
 		a.coreRunning = true
+		a.markCoreRunningLocked(false)
 		if a.systemProxy {
 			setWindowsSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort))
 		}
@@ -983,6 +1028,7 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 		// 内核是 TUN 的代理大脑：停内核前先软停止 TUN（常驻网卡保留）
 		a.stopCoreLocked()
 		a.coreRunning = false
+		a.coreErr, a.corePortErr, a.sysProxyPending = "", false, false
 		if a.tunRunning {
 			a.tunSoftStopLocked()
 			a.addLogInternal("warn", "TUN soft-stopped along with core")
@@ -1076,6 +1122,7 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after routing change: %v", err))
 			a.coreRunning = false
+			a.handleCoreStartFailureLocked(err, true)
 			a.savePersisted()
 			return false, err
 		}
@@ -1204,6 +1251,7 @@ func (a *App) refreshSubscription(id string) error {
 			if err := a.startCoreLocked(); err != nil {
 				a.addLogInternal("error", fmt.Sprintf("Failed to restart core after subscription update: %v", err))
 				a.coreRunning = false
+				a.handleCoreStartFailureLocked(err, true)
 			} else {
 				a.addLogInternal("info", "Active node replaced by subscription refresh, core restarted")
 			}
@@ -1342,6 +1390,7 @@ func (a *App) SaveSettings(settings AppSettings) error {
 		if err := a.startCoreLocked(); err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core with new settings: %v", err))
 			a.coreRunning = false
+			a.handleCoreStartFailureLocked(err, true)
 			if a.tunRunning {
 				// 内核没起来：TUN 留着就是黑洞，软停回直连
 				a.tunSoftStopLocked()
@@ -1354,8 +1403,14 @@ func (a *App) SaveSettings(settings AppSettings) error {
 	if a.systemProxy && old.HttpPort != settings.HttpPort {
 		setWindowsSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", settings.HttpPort))
 	}
+	// 内核之前因端口被占用没起来，用户改了端口：按新端口重新拉起
+	portsChanged := old.SocksPort != settings.SocksPort || old.HttpPort != settings.HttpPort
+	kickCore := !a.coreRunning && a.corePortErr && portsChanged
 	a.savePersisted()
 	tray.requestRebuild()
+	if kickCore {
+		go a.RestartCore()
+	}
 	return nil
 }
 
@@ -1397,6 +1452,7 @@ func (a *App) shutdown(budget time.Duration) {
 	if !a.cleaned.CompareAndSwap(false, true) {
 		return
 	}
+	a.coreRetryGen.Add(1) // 取消内核自动重试
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

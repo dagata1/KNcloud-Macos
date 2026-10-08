@@ -349,6 +349,7 @@ func (a *App) tunSoftStopLocked() {
 		if a.coreRunning {
 			if err := a.startCoreLocked(); err != nil {
 				a.coreRunning = false
+				a.handleCoreStartFailureLocked(err, true)
 				a.addLogInternal("error", fmt.Sprintf("Restart core after TUN stop failed: %v", err))
 			}
 		}

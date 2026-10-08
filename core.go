@@ -394,7 +394,7 @@ func (a *App) startCoreLocked() error {
 		addr := fmt.Sprintf("%s:%d", preListen, p.port)
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
-			return fmt.Errorf("%s port %d is already in use, please change the port in Preferences", p.name, p.port)
+			return &portInUseError{name: p.name, port: p.port}
 		}
 		ln.Close()
 	}
@@ -413,11 +413,16 @@ func (a *App) startCoreLocked() error {
 	}
 	if err := inst.Start(); err != nil {
 		inst.Close()
+		if looksLikePortInUse(err) {
+			// 预检与真正监听之间端口被别的程序抢占（或被系统保留）
+			return fmt.Errorf("%w (%v)", errPortInUse, err)
+		}
 		return fmt.Errorf("failed to start core: %w", err)
 	}
 	a.xrayInst = inst
 	a.statsInst.set(inst)
 	a.coreNodeID = node.ID
+	a.coreErr, a.corePortErr = "", false
 	a.addLogInternal("info", fmt.Sprintf("Xray-core %s started | SOCKS5 127.0.0.1:%d / HTTP 127.0.0.1:%d | node: %s",
 		xrayCoreVersion(), a.settings.SocksPort, a.settings.HttpPort, node.Name))
 	return nil

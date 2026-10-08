@@ -11,6 +11,7 @@ export namespace main {
 	    usedDown: number;
 	    expire: string;
 	    subId: string;
+	    domainCheckedAt?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AccountInfo(source);
@@ -28,6 +29,7 @@ export namespace main {
 	        this.usedDown = source["usedDown"];
 	        this.expire = source["expire"];
 	        this.subId = source["subId"];
+	        this.domainCheckedAt = source["domainCheckedAt"];
 	    }
 	}
 	export class AppSettings {
@@ -41,6 +43,7 @@ export namespace main {
 	    coreType: string;
 	    dnsServers: string;
 	    minimizeToTray: boolean;
+	    subUpdateHours: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppSettings(source);
@@ -58,6 +61,7 @@ export namespace main {
 	        this.coreType = source["coreType"];
 	        this.dnsServers = source["dnsServers"];
 	        this.minimizeToTray = source["minimizeToTray"];
+	        this.subUpdateHours = source["subUpdateHours"];
 	    }
 	}
 	export class CoreStatus {
@@ -76,6 +80,10 @@ export namespace main {
 	    httpPort: number;
 	    tunRunning: boolean;
 	    tunnelMode: boolean;
+	    busy: boolean;
+	    coreState: string;
+	    coreError: string;
+	    corePortError: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new CoreStatus(source);
@@ -98,6 +106,10 @@ export namespace main {
 	        this.httpPort = source["httpPort"];
 	        this.tunRunning = source["tunRunning"];
 	        this.tunnelMode = source["tunnelMode"];
+	        this.busy = source["busy"];
+	        this.coreState = source["coreState"];
+	        this.coreError = source["coreError"];
+	        this.corePortError = source["corePortError"];
 	    }
 	}
 	export class LogItem {
@@ -143,6 +155,7 @@ export namespace main {
 	    hostName?: string;
 	    serviceName?: string;
 	    method?: string;
+	    username?: string;
 	    insecure?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -175,6 +188,7 @@ export namespace main {
 	        this.hostName = source["hostName"];
 	        this.serviceName = source["serviceName"];
 	        this.method = source["method"];
+	        this.username = source["username"];
 	        this.insecure = source["insecure"];
 	    }
 	}

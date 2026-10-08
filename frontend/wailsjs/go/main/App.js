@@ -90,6 +90,10 @@ export function RefreshAccount() {
   return window['go']['main']['App']['RefreshAccount']();
 }
 
+export function RestartCore() {
+  return window['go']['main']['App']['RestartCore']();
+}
+
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
 }

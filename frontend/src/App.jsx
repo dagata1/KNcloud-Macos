@@ -54,7 +54,7 @@ import {
   StartAutoPing,
   IsAutoPinging,
   GetCoreStatus,
-  ToggleCore,
+  RestartCore,
   SetRoutingMode,
   SimpleConnect,
   GetSubscriptions,
@@ -271,6 +271,16 @@ export default function App() {
     }
   };
 
+  // 内核状态（仪表盘状态条与「重启内核」按钮）
+  const coreState = status.coreState || (status.running ? 'running' : 'stopped');
+  const coreBad = coreState !== 'running';
+  const coreStateLabel = {
+    running: '内核运行中',
+    stopped: '内核已停止',
+    retrying: '内核启动失败 · 自动重试中…',
+    failed: '内核启动失败' + (status.corePortError ? '：端口被占用' : ''),
+  }[coreState] || '内核已停止';
+
   // 关闭按钮的语义取决于「关闭窗口时最小化到托盘」开关
   const closeWindowTitle = settings.minimizeToTray
     ? '关闭（最小化到系统托盘）'
@@ -324,15 +334,20 @@ export default function App() {
   };
 
   // Actions
-  const handleToggleCore = async () => {
-    const nextState = !status.running;
+  // 「重启内核」：停止并重新启动内核，后端按当前模式重新应用系统代理（TUN 下保持暂停）
+  const [restartingCore, setRestartingCore] = useState(false);
+  const handleRestartCore = async () => {
+    if (restartingCore) return;
+    setRestartingCore(true);
     try {
-      await ToggleCore(nextState);
+      await RestartCore();
+      showToast('内核已重新启动', 'success');
     } catch (e) {
-      showToast('内核启动失败：' + (e?.message || e), 'error');
+      showToast('重启内核失败：' + (e?.message || e), 'error');
+    } finally {
+      try { setStatus(await GetCoreStatus()); } catch (_) {}
+      setRestartingCore(false);
     }
-    const updated = await GetCoreStatus();
-    setStatus(updated);
   };
 
   const handleThemeToggle = async () => {
@@ -1361,7 +1376,41 @@ export default function App() {
                 <div>
                   <h1 className="content-title">运行状态概览</h1>
                 </div>
+                <div className={`core-status core-${coreState}`}>
+                  <span className="core-dot" aria-hidden="true" />
+                  <span className="core-label" title={status.coreError || ''}>{coreStateLabel}</span>
+                  <button
+                    type="button"
+                    className={`win11-btn core-restart-btn ${coreBad ? 'primary' : ''}`}
+                    onClick={handleRestartCore}
+                    disabled={restartingCore}
+                    title="停止并重新启动 Xray 内核，按当前模式重新应用系统代理"
+                  >
+                    <RefreshCw size={13} className={restartingCore ? 'spin' : ''} />
+                    {restartingCore ? '重启中…' : '重启内核'}
+                  </button>
+                </div>
               </div>
+
+              {(coreState === 'failed' || coreState === 'retrying') && (
+                <div className="win11-card core-error-card" role="alert">
+                  <div className="core-error-title">
+                    {coreState === 'retrying' ? '内核启动失败，正在自动重试…' : '内核启动失败'}
+                  </div>
+                  {status.coreError && <div className="core-error-reason">{status.coreError}</div>}
+                  <div className="core-error-hint">
+                    {status.corePortError ? (
+                      <>
+                        端口被其它程序占用。请在
+                        <button type="button" className="core-link" onClick={() => setActiveTab('settings')}>首选项设置</button>
+                        中更换 SOCKS / HTTP 端口，保存后内核会自动重新启动。
+                      </>
+                    ) : coreState === 'retrying'
+                      ? '程序会按 2 秒 / 5 秒 / 15 秒的间隔自动重试，也可以立即点击「重启内核」。'
+                      : '自动重试已结束。排查原因后点击「重启内核」再试一次。系统代理已暂时关闭，避免断网。'}
+                  </div>
+                </div>
+              )}
 
               {account && account.loggedIn && (
                 <div className="acct-split">

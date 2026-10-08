@@ -46,6 +46,8 @@ export function PingNodes(arg1:Array<string>):Promise<Array<main.NodeItem>>;
 
 export function RefreshAccount():Promise<main.AccountInfo>;
 
+export function RestartCore():Promise<main.CoreStatus>;
+
 export function SaveSettings(arg1:main.AppSettings):Promise<void>;
 
 export function SelectNode(arg1:string):Promise<main.NodeItem>;
