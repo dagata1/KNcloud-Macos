@@ -155,7 +155,7 @@ func (a *App) ImportNodesFromClipboard() (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i := range nodes {
-		nodes[i].ID = fmt.Sprintf("node-%d", time.Now().UnixNano()+int64(i))
+		nodes[i].ID = newNodeID()
 		if nodes[i].Group == "" {
 			nodes[i].Group = "Custom"
 		}

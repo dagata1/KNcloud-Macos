@@ -320,7 +320,7 @@ func (a *App) tunStartLocked() error {
 	}
 	a.tunRunning = true
 	a.suspendSystemProxyForTunLocked()
-	flushDnsClientCache()
+	go flushDnsClientCache() // 异步：此处持有 a.mu，不等外部命令
 	engine := "gVisor (" + dev.Name() + ")"
 	if native {
 		engine = "native tun2socks (SSTAP 1)"
@@ -380,7 +380,7 @@ func (a *App) resumeSystemProxyAfterTunLocked() {
 		return
 	}
 	a.tunPausedSysProxy = false
-	if a.quitting {
+	if a.quitting.Load() {
 		return
 	}
 	if !a.coreRunning {
@@ -551,7 +551,7 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 			a.stopTapForwarding()
 			return a.startTapForwarding()
 		},
-		flushDNS: flushDnsClientCache,
+		flushDNS: func() { go flushDnsClientCache() }, // 异步：调用方持有 a.mu
 	}
 	err = runTunNodeSwitch(a.tunRt, a.tunRouteOps(), desired, deps)
 	if err != nil {

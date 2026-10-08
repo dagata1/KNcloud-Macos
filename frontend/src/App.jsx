@@ -473,7 +473,9 @@ export default function App() {
         showToast(`已切换至「${target.name}」，已断开旧连接，请刷新页面查看新 IP`, 'success');
       }
     } catch (e) {
-      showToast('切换节点失败：' + (e?.message || e), 'error');
+      const msg = String(e?.message || e);
+      if (msg.includes('superseded')) return; // 被更新的点击取代，由那次请求刷新界面
+      showToast('切换节点失败：' + msg, 'error');
     }
     setNodes(await GetNodes());
     setStatus(await GetCoreStatus());
@@ -544,15 +546,24 @@ export default function App() {
   // 路由页「全局路由模式」卡片与仪表盘按钮共用同一套互斥逻辑
   const handleRoutingChange = (mode) => handleModeSelect(mode);
 
+  // 换节点：
+  //  - 「已连接」只按后端确认的状态判断；切换进行中的乐观高亮不算，点别的节点会发起新切换；
+  //  - 新点击会取代仍在进行的旧请求（后端让排队中的旧请求直接放弃），只有最后一次点击的结果生效；
+  //  - 前端兜底 20 秒超时（后端自己 12 秒就会报超时），界面绝不会一直停在「切换中…」。
+  const switchSeqRef = useRef(0);
   const handleSelectNode = async (id) => {
     const target = nodes.find(n => n.id === id);
     if (!target) return;
-    if (target.active) {
+    if (switchingNodeId === id) {
+      showToast(`正在切换至「${target.name}」…`, 'info');
+      return;
+    }
+    if (!switchingNodeId && target.active) {
       showToast(`当前已连接至「${target.name}」`, 'info');
       return;
     }
-    if (switchingNodeId) return;
 
+    const seq = ++switchSeqRef.current;
     setSwitchingNodeId(id);
     // 乐观更新：立刻让选中圆点与高亮跳到目标节点，界面零延迟即时响应
     setNodes(prev => prev.map(n => ({ ...n, active: n.id === id })));
@@ -562,8 +573,15 @@ export default function App() {
       activeNodeProto: target.protocol
     }));
 
+    let timer;
     try {
-      await SelectNode(id);
+      await Promise.race([
+        SelectNode(id),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('切换超时，请稍后重试')), 20000);
+        })
+      ]);
+      if (seq !== switchSeqRef.current) return; // 已被更新的点击取代
       // TUN 模式下换节点会强制断开存量连接（否则旧节点的 keep-alive 连接
       // 会让出口 IP 看起来没变），提醒用户刷新页面而不是以为切换失败。
       showToast(
@@ -573,15 +591,25 @@ export default function App() {
         'success'
       );
     } catch (e) {
-      showToast('切换节点失败：' + (e?.message || e), 'error');
+      if (seq !== switchSeqRef.current) return;
+      const msg = String(e?.message || e);
+      if (msg.includes('superseded')) return;
+      showToast('切换节点失败：' + msg, 'error');
     } finally {
-      const [updatedNodes, updatedStatus] = await Promise.all([
-        GetNodes(),
-        GetCoreStatus()
-      ]);
-      if (updatedNodes) setNodes(updatedNodes);
-      if (updatedStatus) setStatus(updatedStatus);
-      setSwitchingNodeId(null);
+      clearTimeout(timer);
+      if (seq === switchSeqRef.current) {
+        try {
+          const [updatedNodes, updatedStatus] = await Promise.all([
+            GetNodes(),
+            GetCoreStatus()
+          ]);
+          if (seq === switchSeqRef.current) {
+            if (updatedNodes) setNodes(updatedNodes);
+            if (updatedStatus) setStatus(updatedStatus);
+          }
+        } catch (_) { /* ignore */ }
+        if (seq === switchSeqRef.current) setSwitchingNodeId(null);
+      }
     }
   };
 

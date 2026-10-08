@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -269,7 +270,7 @@ func (a *App) traySetTun() {
 }
 
 func (a *App) traySelectNode(id string) {
-	if _, err := a.SelectNode(id); err != nil {
+	if _, err := a.SelectNode(id); err != nil && !errors.Is(err, errSwitchSuperseded) {
 		a.addLogInternal("error", fmt.Sprintf("Tray: switch node failed: %v", err))
 	}
 	a.notifyFrontend()

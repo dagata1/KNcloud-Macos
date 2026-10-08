@@ -41,10 +41,27 @@ func hiddenProc() *syscall.SysProcAttr {
 }
 
 // runHidden 执行一个控制台程序并取回输出，全程不闪黑窗。
+// runHiddenTimeout 外部命令（netsh / ipconfig / powershell）的默认上限。
+// 这些命令大多在持有 a.mu 时调用：没有上限的话，一个卡住的子进程会让整个程序
+// （界面绑定、换节点、退出）跟着无限期挂起。
+const runHiddenTimeout = 45 * time.Second
+
 func runHidden(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+	return runHiddenWithin(runHiddenTimeout, name, args...)
+}
+
+// runHiddenWithin 无窗口运行外部命令，超过 d 强制结束子进程并返回错误。
+func runHiddenWithin(d time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = hiddenProc()
-	return cmd.CombinedOutput()
+	cmd.WaitDelay = 2 * time.Second // 孙进程占着输出管道时也不无限等待
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return out, fmt.Errorf("%s timed out after %s", name, d)
+	}
+	return out, err
 }
 
 // flushDnsClientCache 清空系统 DNS 客户端缓存。
@@ -55,10 +72,12 @@ func runHidden(name string, args ...string) ([]byte, error) {
 // 优先走 ipconfig（秒级）；失败再退到 PowerShell 的
 // Clear-DnsClientCache（某些精简系统缺少 ipconfig）。两者都是本机调用，
 // 不需要管理员权限，因此非管理员路径下也能安全执行。
+//
+// 各命令都有较短的上限：调用方可能在等它（TUN 切换），宁可少清一次缓存也不能挂住。
 func flushDnsClientCache() {
-	if out, err := runHidden("ipconfig", "/flushdns"); err != nil {
+	if out, err := runHiddenWithin(8*time.Second, "ipconfig", "/flushdns"); err != nil {
 		vlog("ipconfig /flushdns failed (%v): %s", err, strings.TrimSpace(string(out)))
-		if out2, err2 := runHidden("powershell", "-NoProfile", "-NonInteractive",
+		if out2, err2 := runHiddenWithin(15*time.Second, "powershell", "-NoProfile", "-NonInteractive",
 			"-Command", "Clear-DnsClientCache"); err2 != nil {
 			vlog("Clear-DnsClientCache failed (%v): %s", err2, strings.TrimSpace(string(out2)))
 		}
@@ -302,8 +321,28 @@ type nodeIPCacheEntry struct {
 
 const nodeIPCacheTTL = 5 * time.Minute
 
-// lookupNodeIPv4sCached 带缓存的解析；解析失败不写缓存，避免缓存住空结果。
+// nodeLookupBudget 解析节点地址最多等待的时间。调用方（TUN 开启 / 换节点）持有 a.mu，
+// 系统解析器 net.LookupIP 本身没有超时，被墙或断网时可能卡很久。
+const nodeLookupBudget = 8 * time.Second
+
+// lookupNodeIPv4sCached 带缓存、有时间上限的解析；解析失败不写缓存，避免缓存住空结果。
+// 超时返回 nil；后台解析完成后照常写缓存，下次调用直接命中。
 func lookupNodeIPv4sCached(host string) []net.IP {
+	if ip := net.ParseIP(host); ip != nil {
+		return lookupNodeIPv4s(host) // IP 字面量无需解析
+	}
+	res := make(chan []net.IP, 1)
+	go func() { res <- lookupNodeIPv4sCachedBlocking(host) }()
+	select {
+	case ips := <-res:
+		return ips
+	case <-time.After(nodeLookupBudget):
+		vlog("resolve node %s: timed out after %s", host, nodeLookupBudget)
+		return nil
+	}
+}
+
+func lookupNodeIPv4sCachedBlocking(host string) []net.IP {
 	key := strings.ToLower(host)
 	now := time.Now()
 	nodeIPCache.Lock()

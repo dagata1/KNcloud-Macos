@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -140,8 +141,13 @@ type App struct {
 	tunPausedSysProxy bool           // TUN 开启时暂停了 Windows 系统代理，关 TUN 时恢复
 	autoPing          autoPinger     // 后台自动测速（autoping.go）
 	account           AccountInfo
-	quitting          bool             // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
-	cleaned           bool             // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
+	// 退出相关状态一律用原子量，不走 a.mu：退出路径必须在 a.mu 被长操作占住时也能推进
+	// （v1.3.26 前 quitApp 先 a.mu.Lock() 再布置 watchdog，锁被占住时托盘「退出」毫无反应）。
+	quitting       atomic.Bool  // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
+	cleaned        atomic.Bool  // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
+	uiCtx          atomic.Value // context.Context：Wails 运行时 ctx 的无锁副本（窗口操作用，见 appCtx）
+	minimizeToTray atomic.Bool  // settings.MinimizeToTray 的无锁镜像（beforeClose 可能跑在 UI 线程，不能等 a.mu）
+	switchGen      atomic.Uint64 // 换节点请求代号：新请求会让仍在排队等锁的旧请求直接放弃（见 SelectNode）
 	webLogin          *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
 }
 
@@ -205,6 +211,16 @@ func NewApp() *App {
 		app.addLogInternal("info", fmt.Sprintf("Removed %d built-in sample node(s) left by a previous version", removedSamples))
 		app.savePersisted()
 	}
+	// 历史版本在同一时钟刻度内批量生成 ID、或订阅里有重复服务器时会产生重复节点 ID：
+	// 重复 ID 会让「切换节点 / 已连接」判断指向错误节点，这里一次性修正。
+	if n := app.dedupeNodeIDsLocked(); n > 0 {
+		app.addLogInternal("warn", fmt.Sprintf("Fixed %d duplicate node ID(s)", n))
+		app.savePersisted()
+	}
+	app.minimizeToTray.Store(app.settings.MinimizeToTray)
+	// 预置状态快照：启动协程持锁拉起内核期间，GetCoreStatus 直接返回它而不是排队等锁
+	st := app.coreStatusLocked()
+	app.statusCache.Store(&st)
 	if n := removeLegacySingBoxFiles(); n > 0 {
 		app.addLogInternal("info", fmt.Sprintf("Removed %d legacy sing-box file(s) from the config directory", n))
 	}
@@ -235,6 +251,7 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	a.ctx = ctx
 	a.mu.Unlock()
+	a.uiCtx.Store(ctx)
 
 	// 开机自启：以持久化设置为准同步注册表 Run 键（首次运行默认开启；
 	// 程序换了安装路径也会在这里把自启项更新到新 exe）。需在托盘构建前执行，
@@ -299,7 +316,9 @@ func (a *App) startup(ctx context.Context) {
 		}
 	}()
 
-	// 启动即自动开启内核与系统代理（用户无需手动操作）
+	// 启动即自动开启内核与系统代理（用户无需手动操作）。
+	// a.mu 只在改内核状态时持有；写注册表 / 通知 WinINet 放到锁外，避免启动期间
+	// 所有界面绑定（GetNodes、SelectNode……）和退出都排队等这把锁。
 	go func() {
 		a.mu.Lock()
 		if err := a.startCoreLocked(); err != nil {
@@ -309,10 +328,19 @@ func (a *App) startup(ctx context.Context) {
 			return
 		}
 		a.coreRunning = true
-
 		server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
-		if err := setWindowsSystemProxy(true, server); err != nil {
+		a.mu.Unlock()
+
+		if a.quitting.Load() {
+			return
+		}
+		err := setWindowsSystemProxy(true, server)
+		a.mu.Lock()
+		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to auto-enable system proxy: %v", err))
+		} else if a.quitting.Load() || a.cleaned.Load() {
+			// 退出清理已经跑过：别把系统代理留在开启状态
+			setWindowsSystemProxy(false, "")
 		} else {
 			a.systemProxy = true
 			a.addLogInternal("info", fmt.Sprintf("System proxy auto-enabled -> %s", server))
@@ -356,12 +384,90 @@ func (a *App) GetNodes() []NodeItem {
 	return out
 }
 
-func (a *App) SelectNode(id string) (NodeItem, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// errSwitchSuperseded 表示这次换节点请求在拿到锁之前就被更新的请求取代，什么都没改。
+// 前端据此静默丢弃旧请求的结果。
+var errSwitchSuperseded = errors.New("node switch superseded by a newer request")
 
+// nodeSwitchLockWait 换节点请求最多等多久 a.mu。正常情况下锁只被持有几十毫秒；
+// 超过这个时间说明另一个耗时操作（开关 TUN、订阅刷新重启内核……）还没结束，
+// 此时返回明确的超时错误，而不是让界面永远停在「切换中…」。
+const nodeSwitchLockWait = 12 * time.Second
+
+// lockWithin 在 d 内尝试获取 a.mu 写锁；abort 返回 true 时提前放弃。拿到锁返回 true。
+//
+// 用于界面触发、且「排队等待本身就是错误」的操作：sync.RWMutex.Lock 无法取消，
+// 一旦有长操作占住锁，调用方（以及排在它后面的所有读者）会一起无限期挂起。
+func (a *App) lockWithin(d time.Duration, abort func() bool) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if a.mu.TryLock() {
+			return true
+		}
+		if abort != nil && abort() {
+			return false
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// SelectNode 切换当前节点。
+//
+//   - 每次调用领取一个新代号；仍在等锁的旧请求发现自己被取代后立即返回 errSwitchSuperseded，
+//     连点多个节点时只有最后一次生效，不会排成一串依次切换；
+//   - 最多等 nodeSwitchLockWait 拿锁，等不到就报超时，界面随即恢复可操作；
+//   - 持锁期间只做内存状态与内核出站热替换（不做任何网络 I/O）；清 DNS 缓存这类外部命令
+//     放到锁外异步执行。
+func (a *App) SelectNode(id string) (NodeItem, error) {
+	gen := a.switchGen.Add(1)
+	superseded := func() bool { return a.switchGen.Load() != gen }
+	a.prewarmNodeLookup(id)
+	if !a.lockWithin(nodeSwitchLockWait, superseded) {
+		if superseded() {
+			return NodeItem{ID: id}, errSwitchSuperseded
+		}
+		a.addLogInternal("error", "Node switch timed out: another long operation is still holding the core state")
+		return NodeItem{ID: id}, fmt.Errorf("切换超时：程序正忙于其它操作（如开关 TUN / 更新订阅），请稍后重试")
+	}
+	if superseded() {
+		// 拿到锁时已有更新的请求在排队：让给它，避免先切到一个用户已经不要的节点
+		a.mu.Unlock()
+		return NodeItem{ID: id}, errSwitchSuperseded
+	}
+	selected, flushDNS, err := a.selectNodeLocked(id)
+	a.mu.Unlock()
+	if flushDNS {
+		go flushDnsClientCache()
+	}
+	return selected, err
+}
+
+// prewarmNodeLookup TUN 模式下换节点要解析节点域名（写防回环 /32），先在锁外解析一次
+// 填好缓存，持锁的切换流程就不必等 DNS。取不到读锁（有长操作在跑）就跳过。
+func (a *App) prewarmNodeLookup(id string) {
+	if !a.mu.TryRLock() {
+		return
+	}
+	tun := a.tunRunning
+	host := ""
+	for i := range a.nodes {
+		if a.nodes[i].ID == id {
+			host = a.nodes[i].Address
+			break
+		}
+	}
+	a.mu.RUnlock()
+	if tun && host != "" && net.ParseIP(host) == nil {
+		lookupNodeIPv4sCached(host)
+	}
+}
+
+// selectNodeLocked SelectNode 的持锁部分（调用方持有写锁）。flushDNS 为 true 时
+// 调用方应在释放锁之后清系统 DNS 缓存。
+func (a *App) selectNodeLocked(id string) (selected NodeItem, flushDNS bool, err error) {
 	// 先定位节点再改动任何状态：找不到时不应把现有选择清空。
-	var selected NodeItem
 	found := false
 	for i := range a.nodes {
 		if a.nodes[i].ID == id {
@@ -371,7 +477,7 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 		}
 	}
 	if !found {
-		return selected, fmt.Errorf("node not found")
+		return selected, false, fmt.Errorf("node not found")
 	}
 
 	// 记下切换前的节点，切换失败时据此回滚，避免把用户钉在一个连不上的节点上
@@ -389,7 +495,6 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 	//    停转发会拆掉 TUN 上的全部连接。
 	//  - 仅系统代理：热切换 proxy 出站（入站监听不断、新请求走新节点），
 	//    热切换不可用时回退为整体重启内核；同样要清 DNS 缓存。
-	var err error
 	if a.tunRunning {
 		err = a.tunHardSwitchLocked(selected)
 		if err != nil {
@@ -405,18 +510,18 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to switch core to the new node: %v", err))
 		} else {
-			// 清 DNS 缓存，否则检测站可能继续命中旧节点的解析结果。
-			flushDnsClientCache()
+			// 清 DNS 缓存，否则检测站可能继续命中旧节点的解析结果（锁外异步执行）。
+			flushDNS = true
 		}
 	}
 	if err != nil {
 		a.rollbackNodeSelectionLocked(prevID, id, wasCoreRunning)
 		a.savePersisted()
 		selected.Active = false
-		return selected, err
+		return selected, false, err
 	}
 	a.savePersisted()
-	return selected, nil
+	return selected, flushDNS, nil
 }
 
 // setActiveNodeLocked 把 id 标为唯一的 Active 节点（调用方需持有写锁）。
@@ -502,7 +607,7 @@ func (a *App) AddNode(node NodeItem) error {
 	defer a.mu.Unlock()
 
 	if node.ID == "" {
-		node.ID = fmt.Sprintf("node-%d", time.Now().UnixNano())
+		node.ID = newNodeID()
 	}
 	if node.Name == "" {
 		node.Name = fmt.Sprintf("%s:%d", node.Address, node.Port)
@@ -514,6 +619,7 @@ func (a *App) AddNode(node NodeItem) error {
 		node.Delay = -1
 	}
 	a.nodes = append(a.nodes, node)
+	a.dedupeNodeIDsLocked()
 	a.addLogInternal("info", fmt.Sprintf("Node added: %s (%s:%d)", node.Name, node.Address, node.Port))
 	a.savePersisted()
 	return nil
@@ -531,7 +637,7 @@ func (a *App) ImportNodesFromLinks(links string) (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i := range nodes {
-		nodes[i].ID = fmt.Sprintf("node-%d", time.Now().UnixNano()+int64(i))
+		nodes[i].ID = newNodeID()
 		if nodes[i].Group == "" {
 			nodes[i].Group = "Custom"
 		}
@@ -593,7 +699,7 @@ func (a *App) UpdateNode(node NodeItem) error {
 			a.coreRunning = false
 			a.addLogInternal("error", fmt.Sprintf("Failed to restart core after node edit: %v", err))
 		} else {
-			flushDnsClientCache()
+			go flushDnsClientCache()
 		}
 	}
 	a.savePersisted()
@@ -1061,14 +1167,18 @@ func (a *App) refreshSubscription(id string) error {
 		key := fmt.Sprintf("%s|%d|%s", nodes[i].Address, nodes[i].Port, nodes[i].UUID)
 		if oldID, ok := oldNodeIDs[key]; ok {
 			nodes[i].ID = oldID
+			// 每个旧 ID 只复用一次：订阅里同一服务器出现多次时，
+			// 重复复用会让多个节点共用一个 ID（点任意一个都被当成同一节点）。
+			delete(oldNodeIDs, key)
 		} else {
-			nodes[i].ID = fmt.Sprintf("node-%d", time.Now().UnixNano()+int64(i))
+			nodes[i].ID = newNodeID()
 		}
 		nodes[i].SubID = id
 		nodes[i].Group = subName
 		updated = append(updated, nodes[i])
 	}
 	a.nodes = updated
+	a.dedupeNodeIDsLocked()
 
 	if activeWasHere {
 		a.activeNodeID = ""
@@ -1121,7 +1231,7 @@ func (a *App) refreshSubscription(id string) error {
 				}
 			}
 		} else if a.coreRunning {
-			flushDnsClientCache()
+			go flushDnsClientCache()
 		}
 	}
 
@@ -1205,6 +1315,7 @@ func (a *App) SaveSettings(settings AppSettings) error {
 	}
 
 	a.settings = settings
+	a.minimizeToTray.Store(settings.MinimizeToTray)
 	a.addLogInternal("info", "Preferences saved")
 
 	// 开机自启：设置项是唯一事实来源，变更时同步写入 / 移除注册表 Run 键；
@@ -1250,96 +1361,125 @@ func (a *App) SaveSettings(settings AppSettings) error {
 
 // ------------------------- Lifecycle -------------------------
 
+// shutdownBudget 退出清理（还原系统代理、停内核 / TUN、落盘）最多占用的时间。
+// 超时后不再等待，直接退出进程：进程内的 Xray 实例随进程结束，系统代理已在第一步还原。
+const shutdownBudget = 3 * time.Second
+
 // beforeClose 关闭窗口时的拦截点。
 // 默认行为是「收进托盘继续后台运行」，只有托盘菜单里的「退出」
 // （会先把 quitting 置为 true）才真正退出并清理系统代理 / 内核。
+//
+// 注意：原生关闭（Alt+F4、任务栏「关闭窗口」）时它跑在 Wails 的 UI 线程上，
+// 这里任何阻塞都会冻结整个窗口与 IPC，所以只读原子量、清理有时间上限。
 func (a *App) beforeClose(ctx context.Context) bool {
-	a.mu.RLock()
-	quitting := a.quitting
-	minimizeToTray := a.settings.MinimizeToTray
-	a.mu.RUnlock()
-
-	if !quitting && minimizeToTray && tray.available() {
+	if !a.quitting.Load() && a.minimizeToTray.Load() && tray.available() {
 		a.hideMainWindow()
 		a.addLogInternal("info", "Window hidden to tray; use the tray menu to quit")
 		return true // 阻止窗口关闭
 	}
-
+	a.quitting.Store(true)
 	a.cleanup()
+	go stopTray()
 	return false
 }
 
-// cleanup 退出前清理：还原系统代理、停止内核与 TUN、保存配置。
+// cleanup 退出前清理：还原系统代理、停止内核与 TUN、保存配置。最多耗时约 shutdownBudget。
 func (a *App) cleanup() {
-	a.mu.Lock()
-	if a.cleaned {
-		a.mu.Unlock()
+	a.shutdown(shutdownBudget)
+}
+
+// shutdown 有时间上限的退出清理，只执行一次。
+//
+// a.mu 可能正被一个卡住的长操作占着（这正是「点退出没反应」的根源），所以：
+//   - 拿锁有上限（lockWithin）；拿不到就跳过需要锁的步骤，只按注册表还原本程序设置的系统代理；
+//   - 整个清理在独立协程里执行，调用方最多等 budget（+少量余量），绝不无限期阻塞。
+func (a *App) shutdown(budget time.Duration) {
+	if !a.cleaned.CompareAndSwap(false, true) {
 		return
 	}
-	a.cleaned = true
-	proxyOn := a.systemProxy
-	a.systemProxy = false
-	// 先释放 a.mu：stopWebLogin 内部会再次获取该锁，RWMutex 不可重入，
-	// 持有锁调用会直接死锁（表现为退出时进程卡住）。
-	a.mu.Unlock()
-
-	if proxyOn {
-		setWindowsSystemProxy(false, "")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if !a.lockWithin(budget, nil) {
+			a.addLogInternal("warn", "Shutdown: core state is busy, restoring system proxy and exiting without waiting")
+			restoreSystemProxyIfOurs()
+			return
+		}
+		proxyOn := a.systemProxy
+		a.systemProxy = false
+		wl := a.webLogin
+		if proxyOn {
+			setWindowsSystemProxy(false, "")
+		}
+		a.stopCoreLocked()
+		a.coreRunning = false // 软停 TUN 时不要再把内核拉起来
+		// tapstack：停转发 + 撤路由；常驻网卡保留在系统里（与 SSTap 的 TAP 一致）
+		a.tunSoftStopLocked()
+		a.savePersisted()
+		a.mu.Unlock()
+		// stopWebLogin 会再取 a.mu（RWMutex 不可重入），所以在锁外关闭回调服务
+		if wl != nil {
+			wl.mu.Lock()
+			wl.stopLocked()
+			wl.mu.Unlock()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget + 500*time.Millisecond):
+		// 持锁后的某一步（如撤 TUN 路由）卡住：至少保证系统代理不指向一个即将消失的端口
+		restoreSystemProxyIfOurs()
 	}
-	a.stopWebLogin()
-
-	a.mu.Lock()
-	a.stopCoreLocked()
-	a.coreRunning = false // 软停 TUN 时不要再把内核拉起来
-	// tapstack：停转发 + 撤路由；常驻网卡保留在系统里（与 SSTap 的 TAP 一致）
-	a.tunSoftStopLocked()
-	a.savePersisted()
-	a.mu.Unlock()
 }
 
 // quitApp 真正退出程序：托盘菜单「退出」与窗口关闭（未开启最小化到托盘）都会走这里。
+//
+// 任何一步都不能让进程赖着不走：先布置兜底 watchdog，再做有上限的清理，最后交给 Wails 退出。
 func (a *App) quitApp() {
-	a.mu.Lock()
-	if a.quitting {
-		a.mu.Unlock()
+	if !a.quitting.CompareAndSwap(false, true) {
 		return
 	}
-	a.quitting = true
-	ctx := a.ctx
-	a.mu.Unlock()
+	// 0. 兜底：无论下面哪一步卡住（WebView2、托盘、内核），到点强制结束进程
+	go func() {
+		time.Sleep(shutdownBudget + 2500*time.Millisecond)
+		restoreSystemProxyIfOurs()
+		os.Exit(0)
+	}()
 
-	// 1. 立即隐藏主窗口，给用户即时的视觉反馈与响应
-	a.hideMainWindow()
-
+	// 1. 立即隐藏主窗口给用户反馈。跨线程 ShowWindow 在 UI 线程忙时会阻塞，放协程里
+	go a.hideMainWindow()
 	a.addLogInternal("info", "Exiting KNcloud-WIN, restoring system proxy")
 
 	// 2. 异步卸载托盘图标，避免阻塞主退出流程
 	go stopTray()
 
-	// 3. 兜底 watchdog 定时器：如果 Wails runtime.Quit / WebView2 阻塞超过 1.5 秒，强行退出
+	// 3. 有上限的清理（还原系统代理、停内核 / TUN、落盘）
+	a.shutdown(shutdownBudget)
+
+	ctx := a.appCtx()
+	if ctx == nil {
+		os.Exit(0)
+	}
+	// 4. Wails 退出（beforeClose 看到 quitting/cleaned 后直接放行）；它若卡住，1.5 秒后强退
 	go func() {
 		time.Sleep(1500 * time.Millisecond)
-		// 清理可能卡在系统代理、TUN 或内核停止流程中；watchdog 不得等待清理完成，
-		// 否则主窗口虽然关闭，进程仍可能永久残留。
 		os.Exit(0)
 	}()
-
-	if ctx != nil {
-		runtime.Quit(ctx)
-		return
-	}
-	a.cleanup()
-	os.Exit(0)
+	runtime.Quit(ctx)
 }
 
 // ------------------------- Window Controls -------------------------
 
 // appCtx 读取 Wails 运行时 context。托盘回调可能在 OnStartup 之前触发
 // （例如用户立刻又双击了一次图标），所以统一走加锁读取。
+//
+// 无锁读取：窗口操作（显示/隐藏/关闭）绝不能排在 a.mu 后面，否则长操作占锁期间
+// 关闭按钮、托盘菜单全部失灵。
 func (a *App) appCtx() context.Context {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.ctx
+	if v, ok := a.uiCtx.Load().(context.Context); ok {
+		return v
+	}
+	return nil
 }
 
 // showMainWindow 显示并激活主窗口（托盘左键 / 菜单「显示主界面」）。
