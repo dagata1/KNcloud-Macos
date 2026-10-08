@@ -122,6 +122,7 @@ export default function App() {
   
   // 简易模式自定义节点下拉是否展开
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
+  const [nodeMenuStyle, setNodeMenuStyle] = useState({});
   const nodeTriggerRef = useRef(null);
   // 下拉收起后让触发按钮失焦：否则切出窗口再切回时 WebView2 会对仍持有焦点的按钮显示焦点环
   useEffect(() => {
@@ -902,6 +903,23 @@ export default function App() {
     );
   }
 
+  // 简易模式节点下拉：按窗口剩余空间限高，下方放不下时向上展开，保证能滚到最后一个节点
+  const toggleNodeMenu = () => {
+    if (nodeMenuOpen) { setNodeMenuOpen(false); return; }
+    const r = nodeTriggerRef.current?.getBoundingClientRect();
+    if (r) {
+      const margin = 12;
+      const below = window.innerHeight - r.bottom - 6 - margin;
+      const above = r.top - 6 - margin - 40; // 40 = 标题栏
+      if (below < 200 && above > below) {
+        setNodeMenuStyle({ top: 'auto', bottom: 'calc(100% + 6px)', maxHeight: Math.max(120, Math.min(360, above)) });
+      } else {
+        setNodeMenuStyle({ maxHeight: Math.max(120, Math.min(360, below)) });
+      }
+    }
+    setNodeMenuOpen(true);
+  };
+
   // ---------------- 简易模式（点击即用，无复杂设置） ----------------
   if (uiMode === 'simple') {
     const activeNode = nodes.find(n => n.active);
@@ -972,7 +990,7 @@ export default function App() {
 
           <div className="simple-node-area" style={{ position: 'relative' }}>
             <label>代理节点</label>
-            <button type="button" ref={nodeTriggerRef} className="simple-node-trigger" onClick={() => setNodeMenuOpen(o => !o)}>
+            <button type="button" ref={nodeTriggerRef} className="simple-node-trigger" onClick={toggleNodeMenu}>
               {activeNode ? (
                 <>
                   <span className={`proto-badge proto-${activeNode.protocol.toLowerCase()}`}>{activeNode.protocol}</span>
@@ -993,7 +1011,7 @@ export default function App() {
             {nodeMenuOpen && (
               <>
                 <div style={{ position: 'fixed', inset: 0, zIndex: 90 }} onClick={() => setNodeMenuOpen(false)} />
-                <div className="simple-node-menu">
+                <div className="simple-node-menu" style={nodeMenuStyle}>
                   {nodes.length === 0 && <div className="simple-node-empty">暂无节点，请在普通模式中添加</div>}
                   {nodes.map(n => (
                     <div
