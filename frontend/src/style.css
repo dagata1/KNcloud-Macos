@@ -1701,3 +1701,29 @@ select.win11-input option {
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* ---------- 关于与更新 ---------- */
+.update-result { display: flex; flex-direction: column; gap: 10px; }
+.update-msg { font-size: 12px; color: var(--text-secondary); }
+.update-msg.has-update { color: var(--accent); font-weight: 600; font-size: 13px; }
+.update-notes {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card-active);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  user-select: text;
+}
+.update-progress { display: flex; flex-direction: column; gap: 6px; }
+.update-bar { height: 4px; }
+.update-progress-msg { font-size: 12px; color: var(--text-secondary); }
+.update-progress-msg.error { color: #d13438; }
+.dark-theme .update-progress-msg.error { color: #ff99a4; }

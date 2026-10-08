@@ -212,6 +212,50 @@ export namespace main {
 	        this.autoCheck = source["autoCheck"];
 	    }
 	}
+	export class UpdateInfo {
+	    currentVersion: string;
+	    latestVersion: string;
+	    hasUpdate: boolean;
+	    isDev: boolean;
+	    notes: string;
+	    publishedAt: string;
+	    releaseUrl: string;
+	    assetSize: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.currentVersion = source["currentVersion"];
+	        this.latestVersion = source["latestVersion"];
+	        this.hasUpdate = source["hasUpdate"];
+	        this.isDev = source["isDev"];
+	        this.notes = source["notes"];
+	        this.publishedAt = source["publishedAt"];
+	        this.releaseUrl = source["releaseUrl"];
+	        this.assetSize = source["assetSize"];
+	        this.message = source["message"];
+	    }
+	}
+	export class UpdateProgress {
+	    stage: string;
+	    percent: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateProgress(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.stage = source["stage"];
+	        this.percent = source["percent"];
+	        this.message = source["message"];
+	    }
+	}
 
 }
 

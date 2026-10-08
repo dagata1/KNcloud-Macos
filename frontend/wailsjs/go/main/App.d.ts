@@ -6,6 +6,8 @@ export function AddNode(arg1:main.NodeItem):Promise<void>;
 
 export function CancelWebLogin():Promise<void>;
 
+export function CheckForUpdate():Promise<main.UpdateInfo>;
+
 export function ClearLogs():Promise<void>;
 
 export function CopyNodeShareLink(arg1:string):Promise<boolean>;
@@ -16,6 +18,8 @@ export function DeleteNodes(arg1:Array<string>):Promise<void>;
 
 export function GetAccount():Promise<main.AccountInfo>;
 
+export function GetAppVersion():Promise<string>;
+
 export function GetCoreStatus():Promise<main.CoreStatus>;
 
 export function GetLogs():Promise<Array<main.LogItem>>;
@@ -25,6 +29,8 @@ export function GetNodes():Promise<Array<main.NodeItem>>;
 export function GetSettings():Promise<main.AppSettings>;
 
 export function GetSubscriptions():Promise<Array<main.SubscriptionItem>>;
+
+export function GetUpdateProgress():Promise<main.UpdateProgress>;
 
 export function ImportNodesFromClipboard():Promise<number>;
 
@@ -59,6 +65,8 @@ export function SimpleConnect(arg1:boolean):Promise<boolean>;
 export function SkipLogin():Promise<main.AccountInfo>;
 
 export function StartAutoPing():Promise<void>;
+
+export function StartUpdate():Promise<void>;
 
 export function StartWebLogin():Promise<string>;
 

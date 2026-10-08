@@ -10,6 +10,10 @@ export function CancelWebLogin() {
   return window['go']['main']['App']['CancelWebLogin']();
 }
 
+export function CheckForUpdate() {
+  return window['go']['main']['App']['CheckForUpdate']();
+}
+
 export function ClearLogs() {
   return window['go']['main']['App']['ClearLogs']();
 }
@@ -30,6 +34,10 @@ export function GetAccount() {
   return window['go']['main']['App']['GetAccount']();
 }
 
+export function GetAppVersion() {
+  return window['go']['main']['App']['GetAppVersion']();
+}
+
 export function GetCoreStatus() {
   return window['go']['main']['App']['GetCoreStatus']();
 }
@@ -48,6 +56,10 @@ export function GetSettings() {
 
 export function GetSubscriptions() {
   return window['go']['main']['App']['GetSubscriptions']();
+}
+
+export function GetUpdateProgress() {
+  return window['go']['main']['App']['GetUpdateProgress']();
 }
 
 export function ImportNodesFromClipboard() {
@@ -116,6 +128,10 @@ export function SkipLogin() {
 
 export function StartAutoPing() {
   return window['go']['main']['App']['StartAutoPing']();
+}
+
+export function StartUpdate() {
+  return window['go']['main']['App']['StartUpdate']();
 }
 
 export function StartWebLogin() {

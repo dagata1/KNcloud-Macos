@@ -55,6 +55,10 @@ import {
   IsAutoPinging,
   GetCoreStatus,
   RestartCore,
+  GetAppVersion,
+  CheckForUpdate,
+  StartUpdate,
+  GetUpdateProgress,
   SetRoutingMode,
   SimpleConnect,
   GetSubscriptions,
@@ -935,6 +939,41 @@ export default function App() {
       showToast('成功导入 ' + count + ' 个节点！', 'success');
     } catch (e) {
       showToast('导入失败：' + (e?.message || e), 'error');
+    }
+  };
+
+  // ---------- 手动在线更新（首选项设置 →「关于与更新」）：不自动检查、不弹窗 ----------
+  const [appVersion, setAppVersion] = useState('');
+  const [updInfo, setUpdInfo] = useState(null);
+  const [updChecking, setUpdChecking] = useState(false);
+  const [updProgress, setUpdProgress] = useState({ stage: 'idle', percent: 0, message: '' });
+  useEffect(() => {
+    GetAppVersion().then(v => setAppVersion(v || 'dev')).catch(() => {});
+    GetUpdateProgress().then(p => p && setUpdProgress(p)).catch(() => {});
+    const off = EventsOn('kncloud:update-progress', (p) => { if (p) setUpdProgress(p); });
+    return () => { if (typeof off === 'function') off(); };
+  }, []);
+  const updBusy = ['downloading', 'verifying', 'extracting', 'installing', 'restarting'].includes(updProgress.stage);
+  const handleCheckUpdate = async () => {
+    if (updChecking || updBusy) return;
+    setUpdChecking(true);
+    try {
+      const info = await CheckForUpdate();
+      setUpdInfo(info);
+      if (updProgress.stage === 'error') setUpdProgress({ stage: 'idle', percent: 0, message: '' });
+    } catch (e) {
+      setUpdInfo({ hasUpdate: false, message: '检查更新失败：' + String(e?.message || e) });
+    } finally {
+      setUpdChecking(false);
+    }
+  };
+  const handleStartUpdate = async () => {
+    if (updBusy) return;
+    try {
+      setUpdProgress({ stage: 'downloading', percent: 0, message: '准备下载…' });
+      await StartUpdate();
+    } catch (e) {
+      setUpdProgress({ stage: 'error', percent: 0, message: '更新失败：' + String(e?.message || e) });
     }
   };
 
@@ -2080,6 +2119,63 @@ export default function App() {
                     <span className="toggle-track"><span className="toggle-thumb" /></span>
                   </label>
                 </div>
+              </div>
+
+              {/* Group 5: 关于与更新（纯手动：点「检查更新」才联网，点「立即更新」才下载安装） */}
+              <div className="win11-card" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 600 }}>关于与更新</h3>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>当前版本 {appVersion || '…'}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      从 GitHub Releases 检查新版本；不会自动下载或安装，配置与日志在更新时保持不变
+                    </div>
+                  </div>
+                  <button className="win11-btn" onClick={handleCheckUpdate} disabled={updChecking || updBusy} style={{ flex: 'none' }}>
+                    <RefreshCw size={13} className={updChecking ? 'spin' : ''} />
+                    <span>{updChecking ? '检查中…' : '检查更新'}</span>
+                  </button>
+                </div>
+
+                {updInfo && (
+                  <div className="update-result">
+                    <div className={`update-msg ${updInfo.hasUpdate ? 'has-update' : ''}`}>
+                      {updInfo.hasUpdate
+                        ? `发现新版本 ${updInfo.latestVersion}${updInfo.publishedAt ? '（' + updInfo.publishedAt.slice(0, 10) + '）' : ''}`
+                        : (updInfo.message || '已是最新版本') + (updInfo.latestVersion && !updInfo.hasUpdate ? ` · 最新发布 ${updInfo.latestVersion}` : '')}
+                    </div>
+                    {updInfo.hasUpdate && updInfo.notes && (
+                      <pre className="update-notes">{updInfo.notes}</pre>
+                    )}
+                    {updInfo.hasUpdate && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                        <button className="win11-btn primary" onClick={handleStartUpdate} disabled={updBusy}>
+                          <ArrowDownLeft size={13} />
+                          <span>{updBusy ? '更新中…' : '立即更新'}</span>
+                        </button>
+                        {updInfo.assetSize > 0 && (
+                          <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                            安装包 {(updInfo.assetSize / 1048576).toFixed(1)} MB · 完成后自动重启
+                          </span>
+                        )}
+                        {updInfo.releaseUrl && (
+                          <button type="button" className="core-link" onClick={() => BrowserOpenURL(updInfo.releaseUrl)}>查看发布页</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {updProgress.stage !== 'idle' && (
+                  <div className="update-progress">
+                    {updBusy && (
+                      <div className="simple-account-bar update-bar">
+                        <div style={{ width: Math.max(2, Math.min(100, updProgress.percent || 0)) + '%' }} />
+                      </div>
+                    )}
+                    <div className={`update-progress-msg ${updProgress.stage === 'error' ? 'error' : ''}`}>{updProgress.message}</div>
+                  </div>
+                )}
               </div>
             </div>
           )}

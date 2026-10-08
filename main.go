@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"os"
 
 	"github.com/wailsapp/wails/v2"
@@ -14,7 +15,13 @@ import (
 var assets embed.FS
 
 func main() {
+	// 在线更新后由旧进程拉起：先等旧进程退出，否则单实例锁会把本进程当成「重复启动」
+	waitForParentExit(os.Args)
 	app := NewApp()
+	if n := cleanupAfterUpdate(); n > 0 {
+		app.addLogInternal("info", fmt.Sprintf("Removed %d file(s) left by the previous update", n))
+	}
+	app.addLogInternal("info", "KNcloud-WIN version "+appVersion)
 
 	// 隐藏自检入口：KNcloud-WIN.exe --tun-selftest（需管理员），验证简易模式 SSTap 链路
 	if len(os.Args) > 1 && os.Args[1] == "--tun-selftest" {
