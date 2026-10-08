@@ -1635,3 +1635,9 @@ select.win11-input option {
 .acct-logout-text:hover:not(:disabled) { color: #e5534b; background: rgba(229, 83, 75, 0.12); }
 
 .acct-icon-btn { width: 32px; height: 32px; padding: 0; justify-content: center; }
+
+/* 启动页：后端数据就绪前的占位 */
+.boot-body {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; color: var(--text-secondary); font-size: 13px;
+}

@@ -123,6 +123,8 @@ export default function App() {
   // 简易模式自定义节点下拉是否展开
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [nodeMenuStyle, setNodeMenuStyle] = useState({});
+  // 首次从后端取到数据前显示启动页，避免按默认 uiMode 闪出空的简易模式界面
+  const [booted, setBooted] = useState(false);
   const nodeTriggerRef = useRef(null);
   // 下拉收起后让触发按钮失焦：否则切出窗口再切回时 WebView2 会对仍持有焦点的按钮显示焦点环
   useEffect(() => {
@@ -295,8 +297,10 @@ export default function App() {
           ? (curSettings.uiMode === 'classic' ? 'classic' : 'simple')
           : 'simple');
       }
+      setBooted(true);
     } catch (e) {
       console.error("Init data load error", e);
+      setBooted(true);
     }
   };
 
@@ -858,6 +862,27 @@ export default function App() {
   useEffect(() => {
     if (account && !account.loggedIn) applyWindowSize('simple');
   }, [account && account.loggedIn]);
+
+  // ---------------- 启动页（内核启动期间后端暂时忙，数据未就绪） ----------------
+  if (!booted) {
+    return (
+      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
+        <header className="titlebar drag-region">
+          <div className="titlebar-left">
+            <img src={brandLogo} alt="KNcloud" style={{ height: "22px", width: "auto", display: "block" }} />
+          </div>
+          <div className="titlebar-right no-drag">
+            <button className="win-caption-btn" onClick={() => WindowMin()} title="最小化"><Minus size={13} /></button>
+            <button className="win-caption-btn btn-close" onClick={() => WindowClose()} title="关闭"><X size={14} /></button>
+          </div>
+        </header>
+        <div className="boot-body">
+          <LoaderCircle size={28} className="spin" />
+          <span>正在启动…</span>
+        </div>
+      </div>
+    );
+  }
 
   // ---------------- 登录页（未登录且未跳过时显示） ----------------
   if (account && !account.loggedIn) {
