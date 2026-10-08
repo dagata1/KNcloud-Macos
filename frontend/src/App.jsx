@@ -75,7 +75,7 @@ import {
   WindowMax,
   WindowClose
 } from '../wailsjs/go/main/App';
-import { EventsOn, WindowSetSize, WindowUnmaximise } from '../wailsjs/runtime';
+import { EventsOn, WindowSetSize, WindowUnmaximise, BrowserOpenURL } from '../wailsjs/runtime';
 
 export default function App() {
   // 简易模式内容少，窗口切到紧凑尺寸；普通模式恢复默认大小
@@ -1184,6 +1184,15 @@ export default function App() {
                       <span className="acct-plan">{account.planName || 'KNcloud 会员'}</span>
                     </div>
                     <div className="acct-actions">
+                      <button
+                        type="button"
+                        className="acct-action acct-icon-btn"
+                        onClick={() => BrowserOpenURL((account.domain || 'https://www.kncloud.top').replace(/\/+$/, '') + '/')}
+                        title={`打开官网（${(account.domain || 'https://www.kncloud.top').replace(/^https?:\/\//, '').replace(/\/+$/, '')}）`}
+                        aria-label="打开官网"
+                      >
+                        <Globe size={15} />
+                      </button>
                       <button
                         type="button"
                         className="acct-action acct-icon-btn"
