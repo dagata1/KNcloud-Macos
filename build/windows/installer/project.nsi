@@ -117,6 +117,7 @@ Section "uninstall"
 
     !insertmacro wails.unassociateFiles
     !insertmacro wails.unassociateCustomProtocols
+    DeleteRegKey HKCU "Software\Classes\kncloud"
 
     !insertmacro wails.deleteUninstaller
 SectionEnd

@@ -242,6 +242,11 @@ func (a *App) startup(ctx context.Context) {
 		a.addLogInternal("error", fmt.Sprintf("Sync auto-start failed: %v", err))
 	}
 
+	// 注册 kncloud:// 协议，网页「一键订阅」可直接拉起客户端登录并导入订阅
+	if err := registerURLProtocol(); err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Register kncloud:// protocol failed: %v", err))
+	}
+
 	// 系统托盘：右下角常驻图标 + 右键菜单
 	startTray(a)
 
