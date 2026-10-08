@@ -47,6 +47,7 @@ import {
   SelectNode,
   AddNode,
   DeleteNode,
+  DeleteNodes,
   PingNode,
   PingAllNodes,
   PingNodes,
@@ -132,6 +133,11 @@ export default function App() {
   }, [nodeMenuOpen]);
   const [selectedProto, setSelectedProto] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+  const [deleteConfirmIds, setDeleteConfirmIds] = useState(null); // 待确认删除的节点 id 列表
+  const [dragBox, setDragBox] = useState(null); // 框选矩形（视口坐标）
+  const dragRef = useRef(null);
+  const suppressClickRef = useRef(false);
+  const nodeListRef = useRef(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState([]); // 节点列表多选（Ctrl+A / Ctrl+点击 / Shift+点击）
   const [switchingNodeId, setSwitchingNodeId] = useState(null); // 正在切换中的节点 ID
   const [isPingingAll, setIsPingingAll] = useState(false);
@@ -646,9 +652,31 @@ export default function App() {
         return;
       }
       // Esc 取消节点多选
+      if (e.key === "Escape" && deleteConfirmIds) {
+        e.preventDefault();
+        setDeleteConfirmIds(null);
+        return;
+      }
       if (e.key === "Escape" && selectedNodeIds.length > 0) {
         e.preventDefault();
         setSelectedNodeIds([]);
+        return;
+      }
+      // Delete 删除选中节点（先弹确认）
+      if (e.key === "Delete" && !e.ctrlKey && !e.metaKey && !e.altKey && activeTab === "servers"
+          && selectedNodeIds.length > 0 && !deleteConfirmIds && !showAddNodeModal && !showImportModal) {
+        const t = e.target;
+        const tag = ((t && t.tagName) || "").toLowerCase();
+        if (tag !== "input" && tag !== "textarea" && tag !== "select" && !(t && t.isContentEditable)) {
+          e.preventDefault();
+          setDeleteConfirmIds([...selectedNodeIds]);
+          return;
+        }
+      }
+      // 删除确认框：Enter 确认
+      if (deleteConfirmIds && e.key === "Enter") {
+        e.preventDefault();
+        confirmDeleteNodes();
         return;
       }
       // Ctrl+A 节点列表全选
@@ -713,6 +741,93 @@ export default function App() {
     await DeleteNode(id);
     const updatedNodes = await GetNodes();
     setNodes(updatedNodes);
+  };
+
+  const confirmDeleteNodes = async () => {
+    const ids = deleteConfirmIds;
+    setDeleteConfirmIds(null);
+    if (!ids || ids.length === 0) return;
+    try {
+      await DeleteNodes(ids);
+      setNodes(await GetNodes());
+      setSelectedNodeIds([]);
+      showToast(`已删除 ${ids.length} 个节点`, "success");
+    } catch (err) {
+      showToast("删除失败：" + (err?.message || err), "error");
+    }
+  };
+
+  // 鼠标拖动框选：在节点列表上按住左键拖动，矩形覆盖到的节点即被选中；
+  // 按住 Ctrl 拖动则在原有选择上追加。
+  const handleListMouseDown = (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button, input, textarea, select, a')) return;
+    const scroller = nodeListRef.current && nodeListRef.current.closest('.content-surface');
+    if (!scroller) return;
+    const sr = scroller.getBoundingClientRect();
+    dragRef.current = {
+      scroller,
+      // 起点用“滚动内容坐标”记录，滚动时框选仍然对得上
+      sx: e.clientX - sr.left + scroller.scrollLeft,
+      sy: e.clientY - sr.top + scroller.scrollTop,
+      cx: e.clientX,
+      cy: e.clientY,
+      base: (e.ctrlKey || e.metaKey) ? [...selectedNodeIds] : [],
+      active: false,
+      timer: null,
+    };
+    const update = () => {
+      const d = dragRef.current;
+      if (!d) return;
+      const r = d.scroller.getBoundingClientRect();
+      const x0 = d.sx - d.scroller.scrollLeft + r.left;
+      const y0 = d.sy - d.scroller.scrollTop + r.top;
+      const left = Math.min(x0, d.cx), right = Math.max(x0, d.cx);
+      const top = Math.min(y0, d.cy), bottom = Math.max(y0, d.cy);
+      if (!d.active && right - left < 5 && bottom - top < 5) return;
+      d.active = true;
+      setDragBox({ left, top, width: right - left, height: bottom - top });
+      const hit = [];
+      nodeListRef.current.querySelectorAll('[data-node-id]').forEach(el => {
+        const b = el.getBoundingClientRect();
+        if (b.right >= left && b.left <= right && b.bottom >= top && b.top <= bottom) {
+          hit.push(el.getAttribute('data-node-id'));
+        }
+      });
+      setSelectedNodeIds(Array.from(new Set([...d.base, ...hit])));
+    };
+    const onMove = (ev) => {
+      const d = dragRef.current;
+      if (!d) return;
+      d.cx = ev.clientX;
+      d.cy = ev.clientY;
+      update();
+      if (d.active) ev.preventDefault();
+      // 靠近上下边缘时自动滚动
+      const r = d.scroller.getBoundingClientRect();
+      const edge = 40;
+      let dy = 0;
+      if (ev.clientY < r.top + edge) dy = -12;
+      else if (ev.clientY > r.bottom - edge) dy = 12;
+      if (d.timer) { clearInterval(d.timer); d.timer = null; }
+      if (dy && d.active) {
+        d.timer = setInterval(() => { d.scroller.scrollTop += dy; update(); }, 16);
+      }
+    };
+    const onUp = () => {
+      const d = dragRef.current;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (d && d.timer) clearInterval(d.timer);
+      if (d && d.active) {
+        suppressClickRef.current = true; // 拖完松手不要触发卡片点击（切换节点）
+        setTimeout(() => { suppressClickRef.current = false; }, 0);
+      }
+      dragRef.current = null;
+      setDragBox(null);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
   const resetNodeForm = () => {
@@ -1395,11 +1510,11 @@ export default function App() {
                   <h1 className="content-title">节点列表</h1>
                   {selectedNodeIds.length > 0 ? (
                     <p className="content-subtitle">
-                      已选中 {selectedNodeIds.length} 个节点 · 按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 批量测速 · 按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Esc</kbd> 取消选择
+                      已选中 {selectedNodeIds.length} 个节点 · 按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 批量测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Delete</kbd> 删除 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Esc</kbd> 取消选择
                     </p>
                   ) : (
                     <p className="content-subtitle">
-                      快捷键：<kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+A</kbd> 全选 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+点击</kbd> 多选
+                      快捷键：<kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+A</kbd> 全选 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+点击</kbd> 或拖动框选
                     </p>
                   )}
                 </div>
@@ -1414,6 +1529,14 @@ export default function App() {
                       >
                         <Gauge size={13} className={isPingingAll ? 'spin' : ''} />
                         <span>{isPingingAll ? '测速中…' : `测速选中 (${selectedNodeIds.length})`}</span>
+                      </button>
+                      <button
+                        className="win11-btn danger"
+                        onClick={() => setDeleteConfirmIds([...selectedNodeIds])}
+                        title="删除所有选中的节点（快捷键 Delete）"
+                      >
+                        <Trash2 size={13} />
+                        <span>删除选中</span>
                       </button>
                       <button
                         className="win11-btn"
@@ -1455,7 +1578,11 @@ export default function App() {
               </div>
 
               {/* Nodes List */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
+              <div
+                ref={nodeListRef}
+                onMouseDown={handleListMouseDown}
+                style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px', userSelect: dragBox ? 'none' : undefined, paddingBottom: '24px' }}
+              >
                 {filteredNodes.map(node => {
                   const isSwitching = switchingNodeId === node.id;
                   const isSelected = selectedNodeIds.includes(node.id);
@@ -1463,8 +1590,10 @@ export default function App() {
                   return (
                     <div
                       key={node.id}
+                      data-node-id={node.id}
                       className="win11-card"
                       onClick={(e) => {
+                        if (suppressClickRef.current) return;
                         if (e.ctrlKey || e.metaKey) {
                           // Ctrl+点击：加选/减选，不改变当前连接节点
                           setSelectedNodeIds(ids => ids.includes(node.id)
@@ -1969,6 +2098,32 @@ export default function App() {
       )}
 
       {/* Modal: Import Share Links */}
+      {dragBox && (
+        <div style={{
+          position: 'fixed', left: dragBox.left, top: dragBox.top, width: dragBox.width, height: dragBox.height,
+          border: '1px solid var(--accent)', background: 'rgba(0, 120, 212, 0.15)', borderRadius: '2px',
+          pointerEvents: 'none', zIndex: 900
+        }} />
+      )}
+
+      {deleteConfirmIds && (
+        <div className="modal-overlay" onClick={() => setDeleteConfirmIds(null)}>
+          <div className="win11-dialog" onClick={e => e.stopPropagation()} style={{ maxWidth: '380px' }}>
+            <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>删除节点</h2>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '8px 0 4px' }}>
+              {deleteConfirmIds.length === 1
+                ? `确定删除「${(nodes.find(n => n.id === deleteConfirmIds[0]) || {}).name || '该节点'}」吗？`
+                : `确定删除选中的 ${deleteConfirmIds.length} 个节点吗？`}
+              {nodes.some(n => n.active && deleteConfirmIds.includes(n.id)) && ' 其中包含当前正在使用的节点。'}
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '14px' }}>
+              <button className="win11-btn" onClick={() => setDeleteConfirmIds(null)}>取消</button>
+              <button className="win11-btn danger" onClick={confirmDeleteNodes}>删除</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showImportModal && (
         <div className="modal-overlay" onClick={() => setShowImportModal(false)}>
           <div className="win11-dialog" onClick={e => e.stopPropagation()}>
