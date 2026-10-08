@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -75,37 +73,15 @@ var (
 	wintunLoadErr                  error
 )
 
-// loadWintunAPI 把内嵌 wintun.dll 释放到磁盘并解析 API。
-// 优先放到主程序同目录（LoadLibrary 默认搜索路径），失败则放到用户配置目录
-// 并显式指定绝对路径加载。
+// loadWintunAPI 从 bin\wintun.dll 加载并解析 API（绝对路径加载，不依赖 DLL 搜索顺序）。
 func loadWintunAPI() error {
 	wintunLoaded.Do(func() {
-		exePath, e := os.Executable()
-		if e == nil {
-			dst := filepath.Join(filepath.Dir(exePath), "wintun.dll")
-			if fi, se := os.Stat(dst); se != nil || fi.Size() != int64(len(wintunDLL)) {
-				if we := os.WriteFile(dst, wintunDLL, 0644); we == nil {
-					wintunModPath = dst
-				}
-			} else {
-				wintunModPath = dst
-			}
+		p, err := findResource("wintun.dll", "cores")
+		if err != nil {
+			wintunLoadErr = err
+			return
 		}
-		if wintunModPath == "" {
-			cfgDir, ce := appConfigDir()
-			if ce != nil {
-				wintunLoadErr = ce
-				return
-			}
-			dst := filepath.Join(cfgDir, "wintun.dll")
-			if fi, se := os.Stat(dst); se != nil || fi.Size() != int64(len(wintunDLL)) {
-				if we := os.WriteFile(dst, wintunDLL, 0644); we != nil {
-					wintunLoadErr = we
-					return
-				}
-			}
-			wintunModPath = dst
-		}
+		wintunModPath = p
 
 		mod := windows.NewLazyDLL(wintunModPath)
 		pOpen := mod.NewProc("WintunOpenAdapter")

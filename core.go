@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,36 +46,15 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
 )
 
-//go:embed geo/geoip.dat geo/geosite.dat
-var geoAssets embed.FS
-
-// ensureGeoAssets 将内置的 geoip/geosite 数据释放到用户配置目录，返回资产目录。
+// ensureGeoAssets 返回 geoip.dat / geosite.dat 所在目录（绿色版为 <exe目录>\bin）。
 func ensureGeoAssets() (string, error) {
-	dir, err := appConfigDir()
+	ip, err := findResource("geoip.dat", "geo")
 	if err != nil {
 		return "", err
 	}
-	for _, name := range []string{"geoip.dat", "geosite.dat"} {
-		dst := filepath.Join(dir, name)
-		if st, err := os.Stat(dst); err == nil && st.Size() > 1024 {
-			continue
-		}
-		src, err := geoAssets.Open("geo/" + name)
-		if err != nil {
-			return "", err
-		}
-		out, err := os.Create(dst)
-		if err != nil {
-			src.Close()
-			return "", err
-		}
-		if _, err := io.Copy(out, src); err != nil {
-			out.Close()
-			src.Close()
-			return "", err
-		}
-		out.Close()
-		src.Close()
+	dir := filepath.Dir(ip)
+	if _, err := os.Stat(filepath.Join(dir, "geosite.dat")); err != nil {
+		return "", fmt.Errorf("%w: 找不到 bin\\geosite.dat，请把压缩包完整解压后再运行", errResourceMissing)
 	}
 	return dir, nil
 }

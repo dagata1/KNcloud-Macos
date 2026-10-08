@@ -17,12 +17,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// wintunDLL 是常驻虚拟网卡 KNcloud-TAP 所用的驱动 DLL（amd64，见 tapstack.go）。
-// 来自官方发行包 wintun-0.14.1.zip，未做任何修改；
-// 许可见 cores/wintun-LICENSE.txt —— 允许随「仅通过其 API 使用它」的软件一同分发。
-//
-//go:embed cores/wintun.dll
-var wintunDLL []byte
 
 //go:embed geo/cn-routes.txt
 var cnRoutesTxt string

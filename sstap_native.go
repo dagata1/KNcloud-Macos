@@ -24,12 +24,13 @@ const (
 )
 
 func nativeTunPath() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
+	if p, err := findResource("badvpn-tun2socks.exe", filepath.Join("cores", "native", "bin")); err == nil {
+		return p
 	}
-	root := filepath.Dir(exe)
-	return filepath.Join(root, "cores", "native", "bin", "badvpn-tun2socks.exe")
+	if d := exeDir(); d != "" {
+		return filepath.Join(d, "cores", "native", "bin", "badvpn-tun2socks.exe")
+	}
+	return ""
 }
 
 func nativeTunIfaceIndex() (uint32, error) {
@@ -62,7 +63,7 @@ func (a *App) startNativeTun(node NodeItem) error {
 		"--loglevel", "warning",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | syscall.CREATE_NEW_PROCESS_GROUP}
-	logDir, _ := appConfigDir()
+	logDir, _ := appLogDir()
 	if logDir != "" {
 		if f, e := os.OpenFile(filepath.Join(logDir, "sstap-tun2socks.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); e == nil {
 			cmd.Stdout, cmd.Stderr = f, f

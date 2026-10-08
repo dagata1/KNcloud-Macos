@@ -34,22 +34,6 @@ type persistedConfig struct {
 	SubLastUpdate int64 `json:"subLastUpdate,omitempty"`
 }
 
-func appConfigDir() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		base, err = os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(base, "AppData", "Roaming")
-	}
-	dir := filepath.Join(base, "KNcloud")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
 func configFilePath() string {
 	dir, err := appConfigDir()
 	if err != nil {
