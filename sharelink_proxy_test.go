@@ -21,7 +21,7 @@ func TestParseHTTPSProxyLink(t *testing.T) {
 	if n.Username != "mrwdfNTD8M79LCukCieldrqZWqs=" || n.UUID != "exaxgqkKkd0TAMrCxeonWg==" || n.Insecure {
 		t.Fatalf("bad auth: %+v", n)
 	}
-	out, err := buildProxyOutbound(n, true)
+	out, err := buildProxyOutbound(n, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestParseSocksLink(t *testing.T) {
 	if err != nil || n.Username != "user" || n.UUID != "pass" {
 		t.Fatalf("v2rayN socks: %+v %v", n, err)
 	}
-	out, err := buildProxyOutbound(n, false)
+	out, err := buildProxyOutbound(n, false, "")
 	if err != nil || out["protocol"] != "socks" {
 		t.Fatalf("outbound %+v %v", out, err)
 	}
@@ -81,7 +81,7 @@ func TestShadowsocksPluginSkipped(t *testing.T) {
 
 func TestTLSInsecureHonored(t *testing.T) {
 	n, _ := ParseShareLink("trojan://pw@185.220.238.77:11543?allowInsecure=1&sni=185.220.238.77&type=ws&path=%2Fapi#t")
-	out, _ := buildProxyOutbound(n, false)
+	out, _ := buildProxyOutbound(n, false, "")
 	tls := out["streamSettings"].(map[string]interface{})["tlsSettings"].(map[string]interface{})
 	if tls["allowInsecure"] != true {
 		t.Fatalf("allowInsecure not honored: %+v", tls)

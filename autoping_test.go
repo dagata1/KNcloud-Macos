@@ -17,7 +17,7 @@ func TestRealDelayTestConfigEgressBinding(t *testing.T) {
 	}
 	for _, node := range nodes {
 		for _, iface := range []string{"", "以太网"} {
-			cfg, err := realDelayTestConfig(node, 23456, iface)
+			cfg, err := realDelayTestConfig(node, 23456, iface, "")
 			if err != nil {
 				t.Fatalf("%s/%q: %v", node.Protocol, iface, err)
 			}

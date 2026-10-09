@@ -58,12 +58,11 @@ func (a *App) requestAutoPing() {
 }
 
 func (a *App) autoPingRound() {
-	a.mu.RLock()
-	ids := make([]string, 0, len(a.nodes))
-	for _, n := range a.nodes {
+	nodes := a.GetNodes()
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
 		ids = append(ids, n.ID)
 	}
-	a.mu.RUnlock()
 	if len(ids) == 0 {
 		return
 	}

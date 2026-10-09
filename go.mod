@@ -10,6 +10,8 @@ require (
 	gvisor.dev/gvisor v0.0.0-20231202080848-1f7806d17489
 )
 
+require github.com/anytls/sing-anytls v0.0.13
+
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/andybalholm/brotli v1.1.0 // indirect
@@ -43,10 +45,10 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/qpack v0.4.0 // indirect
 	github.com/quic-go/quic-go v0.46.0 // indirect
-	github.com/refraction-networking/utls v1.6.7 // indirect
+	github.com/refraction-networking/utls v1.6.7
 	github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/sagernet/sing v0.9.5 // indirect
+	github.com/sagernet/sing v0.9.5
 	github.com/sagernet/sing-shadowsocks v0.2.7 // indirect
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771 // indirect

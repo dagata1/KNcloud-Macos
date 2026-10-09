@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-// errUnsupportedProtocol 可识别但本版本不支持的协议（如 AnyTLS）：批量导入/订阅时跳过并记日志。
+// errUnsupportedProtocol 可识别但本版本不支持的协议（如带插件的 Shadowsocks）：批量导入/订阅时跳过并记日志。
 var errUnsupportedProtocol = errors.New("unsupported protocol")
 
 // ParseShareLink 将单条分享链接解析为节点；无法识别时返回错误。
@@ -38,8 +38,7 @@ func ParseShareLink(link string) (NodeItem, error) {
 	case strings.HasPrefix(lower, "socks5://"), strings.HasPrefix(lower, "socks://"), strings.HasPrefix(lower, "socks5h://"):
 		return parseProxyLink(link, "SOCKS")
 	case strings.HasPrefix(lower, "anytls://"):
-		// AnyTLS 需要 sing-box 协议桥（Xray 没有该出站），已随 sing-box 一并移除
-		return NodeItem{}, fmt.Errorf("%w: AnyTLS is not supported in this version", errUnsupportedProtocol)
+		return parseUserHostLink(link, "AnyTLS")
 	default:
 		return NodeItem{}, fmt.Errorf("unrecognized protocol")
 	}
@@ -127,6 +126,14 @@ func parseUserHostLink(link, proto string) (NodeItem, error) {
 	if proto == "Hysteria2" {
 		security = "tls"
 		network = "udp"
+	}
+	// AnyTLS 本身就是 TLS over TCP，缺省补齐；type 只保留 tcp，
+	// 别的传输字段（path/host/serviceName 等）对它没有意义
+	if proto == "AnyTLS" {
+		if security == "" || security == "none" {
+			security = "tls"
+		}
+		network = "tcp"
 	}
 	methodPass := ""
 	if proto == "Shadowsocks" {
@@ -348,7 +355,7 @@ func skippedLinksLog(skipped map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%d %s", n, proto))
 	}
 	sort.Strings(parts)
-	return "Skipped unsupported link(s): " + strings.Join(parts, ", ") + " (AnyTLS and Shadowsocks plugins are not supported)"
+	return "Skipped unsupported link(s): " + strings.Join(parts, ", ") + " (Shadowsocks plugins are not supported)"
 }
 
 // BuildShareLink 将节点转换回标准分享链接（ParseShareLink 的逆操作），用于复制到剪贴板。
@@ -399,7 +406,7 @@ func BuildShareLink(n NodeItem) (string, error) {
 			return "", err
 		}
 		return "vmess://" + base64.RawURLEncoding.EncodeToString(data), nil
-	case "VLESS", "Trojan", "Hysteria2":
+	case "VLESS", "Trojan", "Hysteria2", "AnyTLS":
 		q := url.Values{}
 		if n.Security != "" && n.Security != "none" {
 			q.Set("security", n.Security)

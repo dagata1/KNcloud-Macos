@@ -4,7 +4,7 @@
 
 ## 功能
 
-- **真实代理内核**：内置 Xray-core（嵌入编译，无需外部内核文件），支持 VLESS / VMess / Trojan / Shadowsocks 节点，本地提供 SOCKS5 与 HTTP 代理入站
+- **真实代理内核**：内置 Xray-core（嵌入编译，无需外部内核文件），支持 VLESS / VMess / Trojan / Shadowsocks / AnyTLS 节点，本地提供 SOCKS5 与 HTTP 代理入站
 - **订阅管理**：真实拉取订阅链接（自动识别 Base64 / 明文分享链接列表），解析 vmess:// vless:// trojan:// ss:// hysteria2:// 链接（anytls:// 暂不支持，导入时跳过并记日志），自动过滤机场"流量信息/套餐到期"伪节点；支持订阅更新与删除
 - **分享链接导入**：服务器页「导入分享链接」弹窗，支持每行一条批量导入或直接粘贴 Base64 订阅内容
 - **节点测速**：真实 TCP 拨测延迟（单节点 / 全部）
@@ -25,7 +25,7 @@ wails build        # 产物位于 build/bin/KNcloud-WIN.exe
 ## 说明
 
 - Hysteria2 节点可导入展示，但 Xray 内核不支持其代理转发，启动该类节点会给出明确错误
-- AnyTLS 暂不支持：Xray 没有 AnyTLS 出站，原先依赖的 sing-box 协议桥已移除；订阅/导入里的 anytls:// 链接会被跳过并写一条日志
+- AnyTLS：Xray 没有 AnyTLS 出站，程序内置进程内 AnyTLS 协议桥（sing-anytls，本地 SOCKS5，TCP + UDP-over-TCP），Xray 仍负责分流与统计
 - TUN 模式（需管理员）：常驻虚拟网卡 KNcloud-TAP + 进程内 gVisor 协议栈，与分流策略组合——「绕过大陆」时中国大陆网段直接写成物理网卡路由（SSTap「跳过中国 IP」同款，国内流量不进隧道），「全局」时除局域网外全部走代理；也支持 SSTap 的 `.rules` 规则文件（`sstap:<文件路径>`）。TUN 运行中可直接切换策略与节点，不断网
 - 默认端口 SOCKS5 `10808` / HTTP `10809`，与其他代理软件冲突时请在「首选项设置」中修改
 - 首选项中开启「自动启动内核」后，应用启动即自动恢复上次的节点与系统代理状态

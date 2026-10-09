@@ -22,7 +22,7 @@ import (
 type NodeItem struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks, HTTP, SOCKS（Hysteria2 仅解析，Xray 不支持）
+	Protocol string `json:"protocol"` // VMess, VLESS, Trojan, Shadowsocks, HTTP, SOCKS, AnyTLS（Hysteria2 仅解析，Xray 不支持）
 	Address  string `json:"address"`
 	Port     int    `json:"port"`
 	UUID     string `json:"uuid"`
@@ -124,13 +124,16 @@ type App struct {
 	systemProxy       bool
 	routingMode       string
 	activeNodeID      string
-	traffic           trafficMeter               // 经代理节点的流量统计（独立锁，见 traffic.go）
-	statsInst         statsInstHolder            // 当前内核实例（采样协程无锁读取）
-	traySubUpdating   atomic.Bool                // 托盘「更新订阅」进行中
-	subLastAuto       atomic.Int64               // 上次成功更新订阅的 Unix 时间（自动更新判定用）
-	statusCache       atomic.Pointer[CoreStatus] // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
+	traffic           trafficMeter                  // 经代理节点的流量统计（独立锁，见 traffic.go）
+	statsInst         statsInstHolder               // 当前内核实例（采样协程无锁读取）
+	traySubUpdating   atomic.Bool                   // 托盘「更新订阅」进行中
+	subLastAuto       atomic.Int64                  // 上次成功更新订阅的 Unix 时间（自动更新判定用）
+	statusCache       atomic.Pointer[CoreStatus]    // GetCoreStatus 上次拿到锁时的快照（长操作期间返回它）
+	nodesCache        atomic.Pointer[nodesSnapshot] // GetNodes 上次拿到锁时的快照（长操作期间返回它）
 	xrayInst          *xcore.Instance
-	coreNodeID        string // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
+	coreNodeID        string        // 内核 proxy 出站当前实际指向的节点 ID（热切换/回滚判断用）
+	bridge            *anyTLSBridge // AnyTLS 协议桥（Xray 无 AnyTLS 出站，见 anytls.go）
+	bridgeAddr        string        // 桥的本地 SOCKS 地址，生成 Xray 出站时用
 	tunRunning        bool
 	tunIfaceIdx       uint32
 	tap               *tapForwarder // tapstack.go：Go 重写的 SSTap 核心（常驻网卡 + gvisor 转发），TUN 主路径
@@ -149,19 +152,19 @@ type App struct {
 	account           AccountInfo
 	// 退出相关状态一律用原子量，不走 a.mu：退出路径必须在 a.mu 被长操作占住时也能推进
 	// （v1.3.26 前 quitApp 先 a.mu.Lock() 再布置 watchdog，锁被占住时托盘「退出」毫无反应）。
-	quitting       atomic.Bool  // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
-	cleaned        atomic.Bool  // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
-	uiCtx          atomic.Value // context.Context：Wails 运行时 ctx 的无锁副本（窗口操作用，见 appCtx）
-	minimizeToTray atomic.Bool  // settings.MinimizeToTray 的无锁镜像（beforeClose 可能跑在 UI 线程，不能等 a.mu）
+	quitting       atomic.Bool   // true 表示用户已确认退出（托盘菜单「退出」），关闭窗口不再拦截
+	cleaned        atomic.Bool   // true 表示已执行退出清理，避免 beforeClose 与 quitApp 兜底重复执行
+	uiCtx          atomic.Value  // context.Context：Wails 运行时 ctx 的无锁副本（窗口操作用，见 appCtx）
+	minimizeToTray atomic.Bool   // settings.MinimizeToTray 的无锁镜像（beforeClose 可能跑在 UI 线程，不能等 a.mu）
 	switchGen      atomic.Uint64 // 换节点请求代号：新请求会让仍在排队等锁的旧请求直接放弃（见 SelectNode）
 
 	// 内核启动失败兜底（corefallback.go）。以下字段受 a.mu 保护。
-	coreErr         string        // 最近一次内核启动失败的原因；空表示没有失败
-	corePortErr     bool          // 失败原因是端口被占用（不自动重试，提示用户改端口）
-	coreRetrying    bool          // 正在按退避节奏自动重试
-	sysProxyPending bool          // 内核起不来时暂时撤下了系统代理（或启动时还没来得及开），内核恢复后应重新开启
-	coreRetryGen    atomic.Uint64 // 自动重试代号：换节点 / 开关内核 / 手动重启 / 退出时递增以取消正在等待的重试
-	webLogin          *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
+	coreErr         string           // 最近一次内核启动失败的原因；空表示没有失败
+	corePortErr     bool             // 失败原因是端口被占用（不自动重试，提示用户改端口）
+	coreRetrying    bool             // 正在按退避节奏自动重试
+	sysProxyPending bool             // 内核起不来时暂时撤下了系统代理（或启动时还没来得及开），内核恢复后应重新开启
+	coreRetryGen    atomic.Uint64    // 自动重试代号：换节点 / 开关内核 / 手动重启 / 退出时递增以取消正在等待的重试
+	webLogin        *webLoginManager // 网页授权登录的本地回调服务（见 weblogin.go）；用指针避免拷贝内部互斥锁
 }
 
 func NewApp() *App {
@@ -392,12 +395,98 @@ func formatBytes(bytes int64) string {
 
 // ------------------------- Node APIs -------------------------
 
+// GetNodes 返回节点列表。开关 TUN、换节点等长操作会持有写锁数秒；这期间最多等
+// nodesReadWait，拿不到锁就返回上一次的快照，界面（换节点收尾、测速结束刷新）不会被挂住。
 func (a *App) GetNodes() []NodeItem {
+	nodes, _, _ := a.nodesView()
+	return nodes
+}
+
+const nodesReadWait = 1500 * time.Millisecond
+
+// nodesView 节点列表 + TUN 物理出口网卡；fresh=false 表示拿不到锁、返回的是快照。
+func (a *App) nodesView() (nodes []NodeItem, egress string, fresh bool) {
+	if a.rlockWithin(nodesReadWait) {
+		out := make([]NodeItem, len(a.nodes))
+		copy(out, a.nodes)
+		egress = a.tunEgressIface
+		a.mu.RUnlock()
+		snap := make([]NodeItem, len(out))
+		copy(snap, out)
+		a.nodesCache.Store(&nodesSnapshot{nodes: snap, egress: egress})
+		return out, egress, true
+	}
+	if c := a.nodesCache.Load(); c != nil {
+		out := make([]NodeItem, len(c.nodes))
+		copy(out, c.nodes)
+		return out, c.egress, false
+	}
+	// 从未成功读过（启动瞬间）：只能等
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 	out := make([]NodeItem, len(a.nodes))
 	copy(out, a.nodes)
-	return out
+	egress = a.tunEgressIface
+	a.mu.RUnlock()
+	return out, egress, true
+}
+
+type nodesSnapshot struct {
+	nodes  []NodeItem
+	egress string
+}
+
+// rlockWithin 在 d 内尝试拿读锁，拿到返回 true（调用方负责 RUnlock）。
+func (a *App) rlockWithin(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if a.mu.TryRLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// setNodeDelay 回写测速结果。拿不到写锁时先改快照、再在后台补写，测速流程本身不被长操作挂住。
+func (a *App) setNodeDelay(id string, latency int) {
+	// 快照按写时复制更新（并发测速会同时回写，读方随时可能在拷贝它）
+	for {
+		c := a.nodesCache.Load()
+		if c == nil {
+			break
+		}
+		next := &nodesSnapshot{nodes: make([]NodeItem, len(c.nodes)), egress: c.egress}
+		copy(next.nodes, c.nodes)
+		for i := range next.nodes {
+			if next.nodes[i].ID == id {
+				next.nodes[i].Delay = latency
+				break
+			}
+		}
+		if a.nodesCache.CompareAndSwap(c, next) {
+			break
+		}
+	}
+	apply := func() {
+		for i := range a.nodes {
+			if a.nodes[i].ID == id {
+				a.nodes[i].Delay = latency
+				break
+			}
+		}
+	}
+	if a.mu.TryLock() {
+		apply()
+		a.mu.Unlock()
+		return
+	}
+	go func() {
+		a.mu.Lock()
+		apply()
+		a.mu.Unlock()
+	}()
 }
 
 // errSwitchSuperseded 表示这次换节点请求在拿到锁之前就被更新的请求取代，什么都没改。
@@ -456,8 +545,13 @@ func (a *App) SelectNode(id string) (NodeItem, error) {
 	a.coreRetryGen.Add(1)
 	kickCore := !a.coreRunning && !a.tunRunning && (a.coreRetrying || a.coreErr != "")
 	a.coreRetrying = false
+	t0 := time.Now()
 	selected, flushDNS, err := a.selectNodeLocked(id)
+	held := time.Since(t0)
 	a.mu.Unlock()
+	if held > 3*time.Second {
+		a.addLogInternal("warn", fmt.Sprintf("Node switch to [%s] took %s while holding the core lock", selected.Name, held.Round(100*time.Millisecond)))
+	}
 	if flushDNS {
 		go flushDnsClientCache()
 	}
@@ -655,7 +749,7 @@ func (a *App) ImportNodesFromLinks(links string) (int, error) {
 		a.addLogInternal("warn", msg)
 	}
 	if len(nodes) == 0 {
-		return 0, fmt.Errorf("no valid share links found (supported: vmess/vless/trojan/ss)")
+		return 0, fmt.Errorf("no valid share links found (supported: vmess/vless/trojan/ss/anytls)")
 	}
 
 	a.mu.Lock()
@@ -822,19 +916,18 @@ func (a *App) PingNode(id string) int {
 
 // pingNode 真连接测速单个节点并回写延迟；quiet 时不逐个写日志（后台自动测速用，避免刷屏）。
 func (a *App) pingNode(id string, quiet bool) int {
-	a.mu.RLock()
+	// TUN 接管时测速出站绑物理网卡，不经当前节点绕一圈（见 realDelayTestConfig）。
+	// 用 nodesView：长操作占着锁时读快照，测速不跟着排队。
+	nodes, egress, _ := a.nodesView()
 	var target NodeItem
 	found := false
-	for _, n := range a.nodes {
+	for _, n := range nodes {
 		if n.ID == id {
 			target = n
 			found = true
 			break
 		}
 	}
-	// TUN 接管时测速出站绑物理网卡，不经当前节点绕一圈（见 realDelayTestConfig）
-	egress := a.tunEgressIface
-	a.mu.RUnlock()
 
 	if !found {
 		return -2
@@ -842,15 +935,7 @@ func (a *App) pingNode(id string, quiet bool) int {
 
 	// 真连接测速：经该节点完整代理链路请求测速 URL
 	latency := testNodeRealDelay(target, egress)
-
-	a.mu.Lock()
-	for i := range a.nodes {
-		if a.nodes[i].ID == id {
-			a.nodes[i].Delay = latency
-			break
-		}
-	}
-	a.mu.Unlock()
+	a.setNodeDelay(id, latency)
 
 	// 实时推送当前节点的真连接测速结果给前端，实现先测完先显示
 	if a.ctx != nil {
@@ -903,14 +988,12 @@ func (a *App) PingNodes(ids []string) []NodeItem {
 		idMap[id] = true
 	}
 
-	a.mu.RLock()
 	var targets []string
-	for _, n := range a.nodes {
+	for _, n := range a.GetNodes() {
 		if idMap[n.ID] {
 			targets = append(targets, n.ID)
 		}
 	}
-	a.mu.RUnlock()
 
 	if len(targets) == 0 {
 		return a.GetNodes()
@@ -923,12 +1006,11 @@ func (a *App) PingNodes(ids []string) []NodeItem {
 }
 
 func (a *App) PingAllNodes() []NodeItem {
-	a.mu.RLock()
-	allIDs := make([]string, 0, len(a.nodes))
-	for _, n := range a.nodes {
+	nodes := a.GetNodes()
+	allIDs := make([]string, 0, len(nodes))
+	for _, n := range nodes {
 		allIDs = append(allIDs, n.ID)
 	}
-	a.mu.RUnlock()
 	return a.PingNodes(allIDs)
 }
 

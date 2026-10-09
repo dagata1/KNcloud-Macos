@@ -617,17 +617,19 @@ export default function App() {
     } finally {
       clearTimeout(timer);
       if (seq === switchSeqRef.current) {
+        // 先收起「切换中…」，再刷新列表：后端若仍被长操作占着锁，刷新可能要等，
+        // 不能让标记跟着一起挂住（此前就是在这里一直转）。刷新本身也限时 5 秒。
+        setSwitchingNodeId(null);
         try {
-          const [updatedNodes, updatedStatus] = await Promise.all([
-            GetNodes(),
-            GetCoreStatus()
+          const [updatedNodes, updatedStatus] = await Promise.race([
+            Promise.all([GetNodes(), GetCoreStatus()]),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('refresh timeout')), 5000))
           ]);
           if (seq === switchSeqRef.current) {
             if (updatedNodes) setNodes(updatedNodes);
             if (updatedStatus) setStatus(updatedStatus);
           }
-        } catch (_) { /* ignore */ }
-        if (seq === switchSeqRef.current) setSwitchingNodeId(null);
+        } catch (_) { /* 下一次定时轮询会补上 */ }
       }
     }
   };
@@ -779,10 +781,16 @@ export default function App() {
   });
 
   const handlePingAll = async () => {
+    if (isPingingAll) return;
     setIsPingingAll(true);
-    const res = await PingAllNodes();
-    setNodes(res);
-    setIsPingingAll(false);
+    try {
+      const res = await PingAllNodes();
+      if (res) setNodes(res);
+    } catch (err) {
+      showToast('测速失败：' + (err?.message || err), 'error');
+    } finally {
+      setIsPingingAll(false);
+    }
   };
 
   const handleDeleteNode = async (id, e) => {
@@ -1664,7 +1672,7 @@ export default function App() {
                         disabled={isPingingAll}
                         title="真连接测速所有选中的节点（快捷键 Ctrl+R）"
                       >
-                        <Gauge size={13} className={isPingingAll ? 'spin' : ''} />
+                        {isPingingAll ? <LoaderCircle size={13} className="spin" /> : <Gauge size={13} />}
                         <span>{isPingingAll ? '测速中…' : `测速选中 (${selectedNodeIds.length})`}</span>
                       </button>
                       <button
@@ -1702,7 +1710,7 @@ export default function App() {
                         disabled={isPingingAll}
                         title="全部节点真连接测速"
                       >
-                        <Zap size={13} className={isPingingAll ? 'spin' : ''} />
+                        {isPingingAll ? <LoaderCircle size={13} className="spin" /> : <Zap size={13} />}
                         <span>{isPingingAll ? '测速中…' : '全部测速'}</span>
                       </button>
                     </>
@@ -2230,6 +2238,7 @@ export default function App() {
                   <option value="VMess">VMess</option>
                   <option value="Trojan">Trojan</option>
                   <option value="Hysteria2">Hysteria2</option>
+                  <option value="AnyTLS">AnyTLS</option>
                   <option value="Shadowsocks">Shadowsocks</option>
                 </select>
               </div>
@@ -2323,7 +2332,7 @@ export default function App() {
           <div className="win11-dialog" onClick={e => e.stopPropagation()}>
             <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>批量导入分享链接</h2>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '4px 0 10px' }}>
-              每行一条，支持 vmess:// vless:// trojan:// ss:// hysteria2:// 链接（AnyTLS 暂不支持，会被跳过），或直接粘贴 Base64 订阅内容。
+              每行一条，支持 vmess:// vless:// trojan:// ss:// anytls:// hysteria2:// 链接，或直接粘贴 Base64 订阅内容。
             </p>
             <div className="form-group">
               <textarea

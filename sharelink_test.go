@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -34,6 +33,8 @@ func TestShareLinkRoundTrip(t *testing.T) {
 			Security: "tls", Network: "ws", Path: "/vm", HostName: "h.example.org", AlterID: 0},
 		{Protocol: "Hysteria2", Name: "HY2", Address: "hy.example.net", Port: 24433, UUID: "hy-pw",
 			Security: "tls", Network: "udp"},
+		{Protocol: "AnyTLS", Name: "极限量-2", Address: "at.example.cn", Port: 443, UUID: "9sK2mP8xQ7vL3nZ6",
+			Security: "tls", Network: "tcp", SNI: "at.example.cn", Insecure: true},
 	}
 	for _, src := range samples {
 		link, err := BuildShareLink(src)
@@ -130,9 +131,22 @@ func TestShareLink(t *testing.T) {
 	}
 
 	anytls := "anytls://9sK2mP8xQ7vL3nZ6@ac7548f3ebe045b39a90288ff1e97526.pnuqcnp.cn:443?security=tls&insecure=1&allowInsecure=1&type=tcp&headerType=none#%E6%9E%81%E9%99%90%E9%87%8F"
-	// AnyTLS 已移除：解析返回「不支持」，批量导入时跳过并计数，不影响其他链接
-	if _, err := ParseShareLink(anytls); !errors.Is(err, errUnsupportedProtocol) {
-		t.Fatalf("anytls must be reported unsupported, got %v", err)
+	n, err = ParseShareLink(anytls)
+	if err != nil {
+		t.Fatalf("anytls: %v", err)
+	}
+	if n.Protocol != "AnyTLS" || n.Address != "ac7548f3ebe045b39a90288ff1e97526.pnuqcnp.cn" || n.Port != 443 ||
+		n.UUID != "9sK2mP8xQ7vL3nZ6" || n.Security != "tls" || n.Network != "tcp" || !n.Insecure ||
+		n.SNI != "ac7548f3ebe045b39a90288ff1e97526.pnuqcnp.cn" {
+		t.Fatalf("anytls parse wrong: %+v", n)
+	}
+	// 缺省 insecure 时不应误开
+	n, err = ParseShareLink("anytls://pw@at.example.cn:8443#at")
+	if err != nil {
+		t.Fatalf("anytls plain: %v", err)
+	}
+	if n.Insecure || n.Security != "tls" || n.Network != "tcp" {
+		t.Fatalf("anytls defaults wrong: %+v", n)
 	}
 
 	vmJSON := `{"v":"2","ps":"VM-节点","add":"vm.example.com","port":"443","id":"2c56a81e-1287-44df-9d33-149b106c28f3","aid":"0","scy":"auto","net":"ws","host":"cdn.example.com","path":"/ray","tls":"tls","sni":"vm.example.com"}`
@@ -147,17 +161,14 @@ func TestShareLink(t *testing.T) {
 
 	batch := strings.Join([]string{vless, trojan, ssSIP002, vm, anytls, "https://not-a-proxy-link"}, "\n")
 	nodes, skipped := ParseShareLinksReport(batch)
-	if len(nodes) != 4 || skipped["anytls"] != 1 {
-		t.Fatalf("batch expected 4 nodes + 1 skipped anytls, got %d nodes, skipped=%v", len(nodes), skipped)
-	}
-	if msg := skippedLinksLog(skipped); !strings.Contains(msg, "1 anytls") {
-		t.Fatalf("skip log line = %q", msg)
+	if len(nodes) != 5 || len(skipped) != 0 {
+		t.Fatalf("batch expected 5 nodes, got %d nodes, skipped=%v", len(nodes), skipped)
 	}
 
 	// 整段 base64 订阅内容
 	b64Sub := base64.StdEncoding.EncodeToString([]byte(batch))
 	nodes = ParseShareLinks(b64Sub)
-	if len(nodes) != 4 {
-		t.Fatalf("b64 sub expected 4 nodes, got %d", len(nodes))
+	if len(nodes) != 5 {
+		t.Fatalf("b64 sub expected 5 nodes, got %d", len(nodes))
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,8 +76,14 @@ type ruleObj struct {
 func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	switch node.Protocol {
 	case "VLESS", "VMess", "Trojan", "Shadowsocks", "HTTP", "SOCKS":
+	case "AnyTLS":
+		// Xray 没有 AnyTLS 出站，走进程内 AnyTLS 协议桥（见 anytls.go）：
+		// 本配置里的 proxy 出站指向桥的本地 SOCKS 端口
+		if a.bridgeAddr == "" {
+			return "", fmt.Errorf("AnyTLS bridge is not running")
+		}
 	default:
-		return "", fmt.Errorf("Xray core does not support %s (supported: VLESS/VMess/Trojan/Shadowsocks/HTTP/SOCKS)", node.Protocol)
+		return "", fmt.Errorf("Xray core does not support %s (supported: VLESS/VMess/Trojan/Shadowsocks/HTTP/SOCKS/AnyTLS)", node.Protocol)
 	}
 
 	listen := "127.0.0.1"
@@ -123,7 +130,7 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		})
 	}
 
-	proxyOut, err := a.buildProxyOutboundLocked(node)
+	proxyOut, err := a.buildProxyOutboundLocked(node, a.bridgeAddr)
 	if err != nil {
 		return "", err
 	}
@@ -229,7 +236,33 @@ func adsBlockRule() ruleObj {
 const proxyOutboundTag = "proxy"
 
 // buildProxyOutbound 生成 Xray 的 proxy 出站。
-func buildProxyOutbound(node NodeItem, muxEnabled bool) (map[string]interface{}, error) {
+// bridgeAddr 仅 AnyTLS 用得上：Xray 不认识 AnyTLS，只能把流量交给 AnyTLS 协议桥，
+// 此时 proxy 出站退化成指向本机桥端口的 socks 出站（空串表示桥没起）。
+func buildProxyOutbound(node NodeItem, muxEnabled bool, bridgeAddr string) (map[string]interface{}, error) {
+	if needsAnyTLSBridge(node.Protocol) {
+		if bridgeAddr == "" {
+			return nil, fmt.Errorf("AnyTLS bridge is not running")
+		}
+		host, portStr, err := net.SplitHostPort(bridgeAddr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AnyTLS bridge address: %w", err)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AnyTLS bridge port: %w", err)
+		}
+		// udp: true 是必须的：桥的 mixed 入站支持 UDP，
+		// 缺了它 Xray 的 UDP 流量（QUIC、游戏、STUN）会在桥这一层断掉
+		return map[string]interface{}{
+			"tag":      "proxy",
+			"protocol": "socks",
+			"settings": map[string]interface{}{
+				"servers": []map[string]interface{}{{"address": host, "port": port}},
+				"udp":     true,
+			},
+		}, nil
+	}
+
 	stream := map[string]interface{}{"network": node.Network}
 	switch node.Security {
 	case "tls":
@@ -341,15 +374,17 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool) (map[string]interface{},
 //     （CDN/多 A 记录/AAAA）都直接走物理网卡，不会被 TUN 默认路由吸回形成回环；
 //   - Shadowsocks 节点地址钉成预解析 IP（与防回环 /32 一致）：Xray 的 UDP 拨号不受
 //     sockopt.interface 约束，钉 IP 保证 UDP 也走 /32。SS 没有 SNI/Host，钉 IP 无副作用。
-func (a *App) buildProxyOutboundLocked(node NodeItem) (map[string]interface{}, error) {
+//
+// AnyTLS 出站指向本机协议桥（回环），不绑网卡；桥自己已把节点钉成 /32 里的 IP。
+func (a *App) buildProxyOutboundLocked(node NodeItem, bridgeAddr string) (map[string]interface{}, error) {
 	tun := a.tunEgressIface != ""
 	if tun && (node.Protocol == "Shadowsocks" || node.Protocol == "SOCKS") && net.ParseIP(node.Address) == nil {
 		if ips := lookupNodeIPv4sCached(node.Address); len(ips) > 0 {
 			node.Address = ips[0].String()
 		}
 	}
-	out, err := buildProxyOutbound(node, a.settings.MuxEnabled && !tun)
-	if err != nil || !tun {
+	out, err := buildProxyOutbound(node, a.settings.MuxEnabled && !tun, bridgeAddr)
+	if err != nil || !tun || needsAnyTLSBridge(node.Protocol) {
 		return out, err
 	}
 	stream, _ := out["streamSettings"].(map[string]interface{})
@@ -399,20 +434,35 @@ func (a *App) startCoreLocked() error {
 		ln.Close()
 	}
 
+	// Xray 不支持 AnyTLS：这类节点先起 AnyTLS 协议桥，
+	// 再把它的本地 SOCKS 端口当作 Xray 的 proxy 出站
+	if needsAnyTLSBridge(node.Protocol) {
+		bridge, err := startAnyTLSBridge(*node)
+		if err != nil {
+			return fmt.Errorf("failed to start AnyTLS bridge: %w", err)
+		}
+		a.bridge = bridge
+		a.bridgeAddr = bridge.addr
+	}
+
 	coreCfg, err := a.buildCoreConfigLocked(*node)
 	if err != nil {
+		a.stopBridgeLocked()
 		return err
 	}
 	// 用可热替换的 router，运行中切换分流策略无需重启内核（见 routerswap.go）
 	if err := useSwappableRouter(coreCfg); err != nil {
+		a.stopBridgeLocked()
 		return fmt.Errorf("failed to prepare routing: %w", err)
 	}
 	inst, err := xcore.New(coreCfg)
 	if err != nil {
+		a.stopBridgeLocked()
 		return fmt.Errorf("failed to create core instance: %w", err)
 	}
 	if err := inst.Start(); err != nil {
 		inst.Close()
+		a.stopBridgeLocked()
 		if looksLikePortInUse(err) {
 			// 预检与真正监听之间端口被别的程序抢占（或被系统保留）
 			return fmt.Errorf("%w (%v)", errPortInUse, err)
@@ -457,6 +507,16 @@ func (a *App) stopCoreLocked() {
 	}
 	a.statsInst.set(nil)
 	a.coreNodeID = ""
+	a.stopBridgeLocked()
+}
+
+// stopBridgeLocked 停掉 AnyTLS 协议桥（调用方需持有写锁；无桥时为空操作）。
+func (a *App) stopBridgeLocked() {
+	if a.bridge != nil {
+		a.bridge.Stop()
+		a.bridge = nil
+	}
+	a.bridgeAddr = ""
 }
 
 // realDelayTestConfig 生成测速用临时 Xray 实例的配置：SOCKS 入站（port）→ 该节点 proxy 出站。
@@ -465,12 +525,13 @@ func (a *App) stopCoreLocked() {
 // 与主内核同一做法：到被测节点的连接直接走物理网卡，不会被 TUN 默认路由吸进隧道、
 // 套着当前节点出去（那样测出的是「当前节点 + 被测节点」的叠加延迟，还占用当前节点流量）。
 // 测速只走 TCP（SOCKS 入站关 UDP），sockopt.interface 对 TCP 拨号生效。
-func realDelayTestConfig(node NodeItem, port int, egressIface string) (map[string]interface{}, error) {
-	proxyOut, err := buildProxyOutbound(node, false)
+func realDelayTestConfig(node NodeItem, port int, egressIface, bridgeAddr string) (map[string]interface{}, error) {
+	proxyOut, err := buildProxyOutbound(node, false, bridgeAddr)
 	if err != nil {
 		return nil, err
 	}
-	if egressIface != "" {
+	// AnyTLS 出站指向本机协议桥（回环），不绑网卡；桥自己拨号时已钉 /32 里的 IP
+	if egressIface != "" && !needsAnyTLSBridge(node.Protocol) {
 		stream, _ := proxyOut["streamSettings"].(map[string]interface{})
 		if stream == nil {
 			stream = map[string]interface{}{}
@@ -502,6 +563,18 @@ func testNodeRealDelay(node NodeItem, egressIface string) int {
 	// 与 v2rayN 默认的真连接延迟测速地址一致，保证数值可比
 	const testURL = "https://www.google.com/generate_204"
 
+	// AnyTLS 走进程内协议桥：临时起一个桥，Xray 出站指向它。
+	// 每次测速独立起停，桥不与常驻内核共享（并发测速时各占各的端口）。
+	bridgeAddr := ""
+	if needsAnyTLSBridge(node.Protocol) {
+		bridge, err := startAnyTLSBridge(node)
+		if err != nil {
+			return -2
+		}
+		defer bridge.Stop()
+		bridgeAddr = bridge.addr
+	}
+
 	// 找一个空闲端口给临时实例的 SOCKS 入站
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -510,7 +583,7 @@ func testNodeRealDelay(node NodeItem, egressIface string) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	cfg, err := realDelayTestConfig(node, port, egressIface)
+	cfg, err := realDelayTestConfig(node, port, egressIface, bridgeAddr)
 	if err != nil {
 		return -2
 	}
@@ -609,6 +682,16 @@ var errNodeRejected = errors.New("node rejected before switching")
 type preparedOutbound struct {
 	node    NodeItem
 	handler *xcore.OutboundHandlerConfig
+	// bridge 新节点为 AnyTLS 时预先拉起的协议桥。提交成功后移交给 App，
+	// 未提交（失败或放弃）时由 discard 关闭，避免残留 协议桥。
+	bridge *anyTLSBridge
+}
+
+func (p *preparedOutbound) discard() {
+	if p != nil && p.bridge != nil {
+		p.bridge.Stop()
+		p.bridge = nil
+	}
 }
 
 // prepareProxyOutboundLocked 为 node 构建新的 proxy 出站（调用方需持有写锁）。
@@ -619,25 +702,42 @@ func (a *App) prepareProxyOutboundLocked(node NodeItem) (*preparedOutbound, erro
 	}
 	p := &preparedOutbound{node: node}
 
-	proxyOut, err := a.buildProxyOutboundLocked(node)
+	// AnyTLS：Xray 无此出站，新节点要先起自己的协议桥，proxy 出站指向它。
+	// 旧桥（如有）此时仍在服务旧节点，等新出站就位后才停。
+	bridgeAddr := ""
+	if needsAnyTLSBridge(node.Protocol) {
+		bridge, err := startAnyTLSBridge(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start AnyTLS bridge: %w", err)
+		}
+		p.bridge = bridge
+		bridgeAddr = bridge.addr
+	}
+
+	proxyOut, err := a.buildProxyOutboundLocked(node, bridgeAddr)
 	if err != nil {
+		p.discard()
 		return nil, err
 	}
 	raw, err := json.Marshal(map[string]interface{}{
 		"outbounds": []interface{}{proxyOut},
 	})
 	if err != nil {
+		p.discard()
 		return nil, err
 	}
 	pbCfg, err := serial.DecodeJSONConfig(bytes.NewReader(raw))
 	if err != nil {
+		p.discard()
 		return nil, fmt.Errorf("failed to parse outbound config: %w", err)
 	}
 	builtCfg, err := pbCfg.Build()
 	if err != nil {
+		p.discard()
 		return nil, fmt.Errorf("failed to build outbound config: %w", err)
 	}
 	if len(builtCfg.Outbound) == 0 {
+		p.discard()
 		return nil, errHotSwapUnavailable
 	}
 	p.handler = builtCfg.Outbound[0]
@@ -649,10 +749,12 @@ func (a *App) prepareProxyOutboundLocked(node NodeItem) (*preparedOutbound, erro
 func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 	inst := a.xrayInst
 	if inst == nil {
+		p.discard()
 		return errHotSwapUnavailable
 	}
 	mgr, ok := inst.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	if !ok {
+		p.discard()
 		return errHotSwapUnavailable
 	}
 
@@ -662,6 +764,7 @@ func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 	//    （proxy 若是默认出站，摘除会把 defaultHandler 置空，AddHandler 时自动补上。）
 	old := mgr.GetHandler(proxyOutboundTag)
 	if err := mgr.RemoveHandler(context.Background(), proxyOutboundTag); err != nil {
+		p.discard()
 		return fmt.Errorf("failed to detach current outbound: %w", err)
 	}
 
@@ -672,6 +775,7 @@ func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 	// 2) 装入新 handler。失败则把旧 handler 放回去，避免代理出站凭空消失
 	//    （此时 tag 是空的，放回不会冲突）。
 	if err := xcore.AddOutboundHandler(inst, p.handler); err != nil {
+		p.discard()
 		if old != nil {
 			if reAddErr := mgr.AddHandler(context.Background(), old); reAddErr == nil {
 				return fmt.Errorf("failed to apply new outbound (previous node restored): %w", err)
@@ -691,6 +795,14 @@ func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 	}
 	if n := outboundConnTracker.CloseBefore(inst, cut); n > 0 {
 		a.addLogInternal("info", fmt.Sprintf("Closed %d connection(s) still using the previous node", n))
+	}
+	// 4) 旧节点若是 AnyTLS，现在才停它的桥（会切断旧节点上的全部连接），
+	//    再把新节点的桥（如有）移交给 App 管理。
+	a.stopBridgeLocked()
+	if p.bridge != nil {
+		a.bridge = p.bridge
+		a.bridgeAddr = p.bridge.addr
+		p.bridge = nil
 	}
 	return nil
 }
