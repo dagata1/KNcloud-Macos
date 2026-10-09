@@ -1743,7 +1743,6 @@ export default function App() {
                 {filteredNodes.map(node => {
                   const isSwitching = switchingNodeId === node.id;
                   const isSelected = selectedNodeIds.includes(node.id);
-                  const isActive = !!node.active;
                   return (
                     <div
                       key={node.id}
@@ -1779,33 +1778,37 @@ export default function App() {
                         justifyContent: 'space-between',
                         padding: '12px 18px',
                         cursor: 'pointer',
-                        border: (isActive || isSelected)
+                        // 蓝色描边只表示「选中」（编辑 / 批量操作）；当前启用的节点只用「活动」标签标出
+                        border: isSelected
                           ? '1px solid var(--accent)'
                           : '1px solid var(--border-subtle)',
-                        boxShadow: (isActive || isSelected)
+                        boxShadow: isSelected
                           ? '0 0 0 1px var(--accent)'
                           : 'var(--shadow-card)',
-                        background: isActive
+                        background: isSelected
                           ? 'var(--accent-subtle)'
-                          : isSelected
-                            ? 'rgba(0, 120, 212, 0.08)'
-                            : 'var(--bg-card)',
+                          : 'var(--bg-card)',
                         transition: 'all 0.15s ease'
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1 }}>
+                        {/* 节点列表主要用来编辑 / 批量操作：用复选框表示选中，不用单选圆点（启用节点在主页快速选择） */}
                         <div style={{
-                          width: '18px',
-                          height: '18px',
-                          borderRadius: '50%',
-                          border: isActive
-                            ? '5px solid var(--accent)'
-                            : isSelected
-                              ? '4px solid var(--accent)'
-                              : '2px solid var(--border-default)',
-                          backgroundColor: 'transparent',
-                          transition: 'border 0.15s ease'
-                        }} />
+                          width: '16px',
+                          height: '16px',
+                          flexShrink: 0,
+                          borderRadius: '4px',
+                          border: isSelected ? '1px solid var(--accent)' : '1.5px solid var(--border-default)',
+                          backgroundColor: isSelected ? 'var(--accent)' : 'transparent',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          transition: 'all 0.15s ease'
+                        }}>
+                          {isSelected && (
+                            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5" /></svg>
+                          )}
+                        </div>
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                             <span className={`proto-badge proto-${node.protocol.toLowerCase()}`}>{protoLabel(node)}</span>
@@ -1814,9 +1817,9 @@ export default function App() {
                               <span style={{
                                 fontSize: '10px',
                                 fontWeight: 600,
-                                color: 'var(--accent)',
-                                background: 'var(--accent-subtle)',
-                                border: '1px solid var(--accent-border)',
+                                color: '#22c55e',
+                                background: 'rgba(34, 197, 94, 0.12)',
+                                border: '1px solid rgba(34, 197, 94, 0.4)',
                                 padding: '1px 6px',
                                 borderRadius: '3px',
                                 display: 'inline-flex',
