@@ -8,7 +8,7 @@
         <key>CFBundleExecutable</key>
         <string>{{.OutputFilename}}</string>
         <key>CFBundleIdentifier</key>
-        <string>com.wails.{{safeBundleID .Name}}</string>
+        <string>top.kncloud.macos</string>
         <key>CFBundleVersion</key>
         <string>{{.Info.ProductVersion}}</string>
         <key>CFBundleGetInfoString</key>
@@ -18,9 +18,11 @@
         <key>CFBundleIconFile</key>
         <string>iconfile</string>
         <key>LSMinimumSystemVersion</key>
-        <string>10.13.0</string>
+        <string>12.0.0</string>
         <key>NSHighResolutionCapable</key>
         <string>true</string>
+        <key>LSApplicationCategoryType</key>
+        <string>public.app-category.utilities</string>
         <key>NSHumanReadableCopyright</key>
         <string>{{.Info.Copyright}}</string>
         {{if .Info.FileAssociations}}
@@ -42,22 +44,18 @@
           {{end}}
         </array>
         {{end}}
-        {{if .Info.Protocols}}
         <key>CFBundleURLTypes</key>
         <array>
-          {{range .Info.Protocols}}
             <dict>
                 <key>CFBundleURLName</key>
-                <string>com.wails.{{.Scheme}}</string>
+                <string>top.kncloud.macos.kncloud</string>
                 <key>CFBundleURLSchemes</key>
                 <array>
-                    <string>{{.Scheme}}</string>
+                    <string>kncloud</string>
                 </array>
                 <key>CFBundleTypeRole</key>
-                <string>{{.Role}}</string>
+                <string>Viewer</string>
             </dict>
-          {{end}}
         </array>
-        {{end}}
     </dict>
 </plist>
