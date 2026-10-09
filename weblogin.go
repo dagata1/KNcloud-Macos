@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,11 +96,18 @@ func (a *App) StartWebLogin() (string, error) {
 			_, _ = w.Write([]byte(webLoginHTML("授权失败：回调中缺少 token 参数，请重试")))
 			return
 		}
+		// 先把完整的成功页发给浏览器再通知登录协程：协程收到结果后会立即关闭回调服务，
+		// 反过来的顺序会让浏览器偶发拿到空响应（EOF）。
+		page := []byte(webLoginHTML("登录成功！请回到 KNcloud-WIN 客户端继续使用，本页面可以关闭。"))
+		w.Header().Set("Content-Length", strconv.Itoa(len(page)))
+		_, _ = w.Write(page)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 		select {
 		case resCh <- &webLoginResult{token: token, email: email}:
 		default:
 		}
-		_, _ = w.Write([]byte(webLoginHTML("登录成功！请回到 KNcloud-WIN 客户端继续使用，本页面可以关闭。")))
 	})
 	srv := &http.Server{Handler: mux}
 	m.ln = ln
