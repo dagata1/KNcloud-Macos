@@ -242,7 +242,7 @@ func (a *App) fetchLatestRelease() (*ghRelease, error) {
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
 			if resp.StatusCode == http.StatusNotFound {
-				return nil, fmt.Errorf("没有找到已发布的版本")
+				return nil, fmt.Errorf("GitHub 返回 404：发布仓库不可公开访问或尚无正式发布")
 			}
 			continue
 		}

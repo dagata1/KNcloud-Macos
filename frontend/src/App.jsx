@@ -950,7 +950,16 @@ export default function App() {
   useEffect(() => {
     GetAppVersion().then(v => setAppVersion(v || 'dev')).catch(() => {});
     GetUpdateProgress().then(p => p && setUpdProgress(p)).catch(() => {});
-    const off = EventsOn('kncloud:update-progress', (p) => { if (p) setUpdProgress(p); });
+    const off = EventsOn('kncloud:update-progress', (p) => {
+      if (!p) return;
+      if (p.stage === 'error') {
+        // 下载 / 校验 / 安装失败：错误走 Toast，进度区复位
+        showToast(p.message || '更新失败', 'error');
+        setUpdProgress({ stage: 'idle', percent: 0, message: '' });
+        return;
+      }
+      setUpdProgress(p);
+    });
     return () => { if (typeof off === 'function') off(); };
   }, []);
   const updBusy = ['downloading', 'verifying', 'extracting', 'installing', 'restarting'].includes(updProgress.stage);
@@ -959,10 +968,19 @@ export default function App() {
     setUpdChecking(true);
     try {
       const info = await CheckForUpdate();
-      setUpdInfo(info);
       if (updProgress.stage === 'error') setUpdProgress({ stage: 'idle', percent: 0, message: '' });
+      if (info?.hasUpdate) {
+        // 有新版本：保留卡片内的版本说明与「立即更新」按钮
+        setUpdInfo(info);
+      } else {
+        // 已是最新 / 开发版 / 缺安装包：一次性结果走 Toast
+        setUpdInfo(null);
+        const latest = info?.latestVersion && info.message === '已是最新版本' ? `（${info.latestVersion}）` : '';
+        showToast((info?.message || '已是最新版本') + latest, info?.message === '已是最新版本' ? 'success' : 'info');
+      }
     } catch (e) {
-      setUpdInfo({ hasUpdate: false, message: '检查更新失败：' + String(e?.message || e) });
+      setUpdInfo(null);
+      showToast('检查更新失败：' + String(e?.message || e), 'error');
     } finally {
       setUpdChecking(false);
     }
@@ -973,7 +991,8 @@ export default function App() {
       setUpdProgress({ stage: 'downloading', percent: 0, message: '准备下载…' });
       await StartUpdate();
     } catch (e) {
-      setUpdProgress({ stage: 'error', percent: 0, message: '更新失败：' + String(e?.message || e) });
+      setUpdProgress({ stage: 'idle', percent: 0, message: '' });
+      showToast('更新失败：' + String(e?.message || e), 'error');
     }
   };
 
