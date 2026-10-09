@@ -137,16 +137,16 @@ func TestSetRoutingModeAppliesLiveWithoutRestart(t *testing.T) {
 	}
 }
 
-// TestSetRoutingModeClosesExistingConnections 换策略后，按旧策略建立的存量（keep-alive）
-// 隧道必须被切断，入站监听保持可用，新隧道正常。
-func TestSetRoutingModeClosesExistingConnections(t *testing.T) {
+// TestSetRoutingModeKeepsExistingConnections 换策略后，已建立的（keep-alive）隧道保持原出口
+// 不被切断（#13，与 v2rayN 一致），入站监听保持可用，新隧道正常。
+func TestSetRoutingModeKeepsExistingConnections(t *testing.T) {
 	echo := startEchoServer(t)
 	a := newRoutingTestApp(t, "global")
 	a.mu.RLock()
 	inst, port := a.xrayInst, a.settings.SocksPort
 	a.mu.RUnlock()
 
-	// 127.0.0.1 属于 geoip:private，任何策略下都走 direct 出站：验证清扫不只针对 proxy。
+	// 127.0.0.1 属于 geoip:private，任何策略下都走 direct 出站。
 	c := socksDial(t, port, echo)
 	defer c.Close()
 	if err := echoOnce(c, "before"); err != nil {
@@ -158,8 +158,12 @@ func TestSetRoutingModeClosesExistingConnections(t *testing.T) {
 	if _, err := a.SetRoutingMode("direct"); err != nil {
 		t.Fatal(err)
 	}
-	if !waitClosed(c, 3*time.Second) {
-		t.Fatal("换策略后存量连接应被关闭")
+	if waitClosed(c, 1500*time.Millisecond) {
+		t.Fatal("换策略不应切断已建立的连接")
+	}
+	c.SetReadDeadline(time.Time{})
+	if err := echoOnce(c, "still-alive"); err != nil {
+		t.Fatalf("换策略后存量隧道应继续可用: %v", err)
 	}
 	c2 := socksDial(t, port, echo)
 	defer c2.Close()
