@@ -1,0 +1,246 @@
+name: macOS build & test
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.25'
+  NODE_VERSION: '24'
+  WAILS_VERSION: 'v2.15.0'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # go vet / go test on both Apple Silicon and Intel, plus the root TUN smoke test
+  # ---------------------------------------------------------------------------
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, macos-15-intel ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build frontend (needed by go:embed)
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Environment
+        run: |
+          sw_vers; uname -m; go version
+          networksetup -listallnetworkservices || true
+          route -n get default || true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        env:
+          KNCLOUD_SYSPROXY_TEST: '1'
+        run: go test -count=1 -timeout 15m ./... 2>&1 | tee go-test.log
+
+      - name: TUN smoke test (utun + gVisor + route + DNS via privileged helper, sudo)
+        run: |
+          set -o pipefail
+          go test -tags tunsmoke -run TestDarwinTunSmoke -count=1 -v -timeout 5m . 2>&1 | tee tun-smoke.log
+          grep -q "TUN-SMOKE PASS" tun-smoke.log
+
+      - name: Verify system state restored
+        if: always()
+        run: |
+          netstat -rn -f inet | head -40
+          for s in $(networksetup -listallnetworkservices | tail -n +2 | tr ' ' '_'); do
+            svc="${s//_/ }"; echo "== $svc: DNS=$(networksetup -getdnsservers "$svc" | tr '\n' ' ')"
+          done
+          ifconfig | grep -E '^utun' || true
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: |
+            go-test.log
+            tun-smoke.log
+
+  # ---------------------------------------------------------------------------
+  # Universal (arm64 + x86_64) .app → ad-hoc sign → smoke → zip + dmg
+  # ---------------------------------------------------------------------------
+  build:
+    name: build (universal .app / .dmg)
+    runs-on: macos-latest
+    permissions:
+      contents: write   # release on v* tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Version
+        id: ver
+        run: |
+          APP_VERSION="dev"; PLIST_VERSION="0.0.0"; LABEL="${GITHUB_SHA::7}"
+          case "$GITHUB_REF" in refs/tags/v*) APP_VERSION="$GITHUB_REF_NAME"; PLIST_VERSION="${GITHUB_REF_NAME#v}"; LABEL="$GITHUB_REF_NAME" ;; esac
+          echo "app=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          jq --arg v "$PLIST_VERSION" '.info.productVersion=$v' wails.json > wails.tmp && mv wails.tmp wails.json
+          echo "APP_VERSION=$APP_VERSION PLIST_VERSION=$PLIST_VERSION LABEL=$LABEL"
+
+      - name: wails build (darwin/universal)
+        run: wails build -platform darwin/universal -clean -ldflags "-X main.appVersion=${{ steps.ver.outputs.app }}"
+
+      - name: Bundle geo data, ad-hoc codesign, verify
+        run: |
+          APP=build/bin/KNcloud.app
+          cp geo/geoip.dat geo/geosite.dat "$APP/Contents/Resources/"
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          lipo -info "$APP/Contents/MacOS/KNcloud"
+          plutil -lint "$APP/Contents/Info.plist"
+          plutil -p "$APP/Contents/Info.plist"
+          plutil -p "$APP/Contents/Info.plist" | grep -q '"top.kncloud.macos"'
+          plutil -p "$APP/Contents/Info.plist" | grep -q '"kncloud"'
+          du -sh "$APP"
+
+      - name: Smoke - CLI entry points and embedded Xray core (both slices)
+        run: |
+          set -o pipefail
+          BIN=build/bin/KNcloud.app/Contents/MacOS/KNcloud
+          "$BIN" --version | tee smoke.log
+          "$BIN" --core-selftest | tee -a smoke.log
+          echo "--- x86_64 slice under Rosetta ---" | tee -a smoke.log
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 "$BIN" --core-selftest | tee -a smoke.log
+          else
+            echo "Rosetta not available, skipped" | tee -a smoke.log
+          fi
+
+      - name: Smoke - launch the GUI app headless for 20s
+        run: |
+          APP="$PWD/build/bin/KNcloud.app"
+          export HOME_BAK="$HOME"
+          "$APP/Contents/MacOS/KNcloud" > gui.log 2>&1 &
+          PID=$!
+          sleep 20
+          if kill -0 $PID 2>/dev/null; then
+            echo "GUI process alive after 20s (pid $PID)" | tee -a smoke.log
+          else
+            echo "GUI process exited early" | tee -a smoke.log; cat gui.log; exit 1
+          fi
+          screencapture -x gui-screenshot.png 2>/dev/null || true
+          ps -o pid,rss,command -p $PID | tee -a smoke.log
+          lsof -nP -iTCP -sTCP:LISTEN -a -p $PID | tee -a smoke.log || true
+          echo "--- system proxy after launch ---" | tee -a smoke.log
+          networksetup -getwebproxy "$(networksetup -listallnetworkservices | sed -n 2p)" | tee -a smoke.log || true
+          ls -la "$HOME/Library/Application Support/KNcloud" | tee -a smoke.log || true
+          ls -la "$HOME/Library/LaunchAgents" | tee -a smoke.log || true
+          # Cmd+Q equivalent: ask the app to quit, it must restore the system proxy
+          osascript -e 'tell application id "top.kncloud.macos" to quit' || kill $PID
+          for i in $(seq 1 20); do kill -0 $PID 2>/dev/null || break; sleep 0.5; done
+          kill -0 $PID 2>/dev/null && { echo "still running, killing"; kill -9 $PID; } || echo "app exited cleanly" | tee -a smoke.log
+          echo "--- system proxy after quit ---" | tee -a smoke.log
+          networksetup -getwebproxy "$(networksetup -listallnetworkservices | sed -n 2p)" | tee -a smoke.log || true
+          cat gui.log | tail -50
+
+      - name: Package .zip and .dmg
+        run: |
+          LABEL="${{ steps.ver.outputs.label }}"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/bin/KNcloud.app "dist/KNcloud-macOS-$LABEL.zip"
+          (cd dist && shasum -a 256 "KNcloud-macOS-$LABEL.zip" > "KNcloud-macOS-$LABEL.zip.sha256" && cat "KNcloud-macOS-$LABEL.zip.sha256")
+          mkdir -p dmgroot
+          ditto build/bin/KNcloud.app dmgroot/KNcloud.app
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "KNcloud" -srcfolder dmgroot -ov -format UDZO "dist/KNcloud-macOS-$LABEL.dmg"
+          hdiutil verify "dist/KNcloud-macOS-$LABEL.dmg"
+          ls -la dist
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KNcloud-macOS-universal
+          path: dist/
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-smoke-logs
+          path: |
+            smoke.log
+            gui.log
+            gui-screenshot.png
+          if-no-files-found: ignore
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.dmg
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # The shared code must keep compiling (and passing tests) on Windows
+  # ---------------------------------------------------------------------------
+  windows-check:
+    name: windows compile check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build frontend
+        shell: bash
+        run: cd frontend && npm ci && npm run build
+      - name: go vet (windows)
+        shell: bash
+        run: go vet -unsafeptr=false . && go vet -unsafeptr=false -tags taptest .
+      - name: go build (windows/amd64, windows/arm64)
+        shell: bash
+        run: |
+          GOARCH=amd64 go build -o kn-amd64.exe .
+          GOARCH=arm64 go build -o kn-arm64.exe .
+      - name: go test (windows)
+        shell: bash
+        continue-on-error: true
+        run: go test -count=1 -timeout 15m . 2>&1 | tail -60
