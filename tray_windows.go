@@ -189,14 +189,6 @@ func (t *trayController) buildMenu() {
 	}
 	miSub.Click(func() { go a.trayUpdateSubscription() })
 
-	// ---------- 重启内核（与仪表盘「重启内核」一致；内核未运行时标出状态） ----------
-	coreLabel := "重启内核"
-	if !coreRunning {
-		coreLabel = "重启内核（内核未运行）"
-	}
-	miCore := systray.AddMenuItem(coreLabel, "停止并重新启动 Xray 内核，按当前模式重新应用系统代理")
-	miCore.Click(func() { go a.trayRestartCore() })
-
 	systray.AddSeparator()
 
 	// ---------- 代理模式（与仪表盘四个按钮一致，四选一互斥） ----------
@@ -246,6 +238,14 @@ func (t *trayController) buildMenu() {
 	}
 
 	systray.AddSeparator()
+
+	// ---------- 重启内核（与仪表盘「重启内核」一致；内核未运行时标出状态） ----------
+	coreLabel := "重启内核"
+	if !coreRunning {
+		coreLabel = "重启内核（内核未运行）"
+	}
+	miCore := systray.AddMenuItem(coreLabel, "停止并重新启动 Xray 内核，按当前模式重新应用系统代理")
+	miCore.Click(func() { go a.trayRestartCore() })
 
 	miQuit := systray.AddMenuItem("退出", "退出程序并还原系统代理")
 	miQuit.Click(func() { go a.quitApp() })
