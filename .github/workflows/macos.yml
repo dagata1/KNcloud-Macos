@@ -186,12 +186,19 @@ jobs:
           quitApp && log "quit via AppleEvent OK" || { log "app did not quit via AppleEvent"; exit 1; }
 
           log "=== 2nd launch with a seeded node (direct mode) ==="
+          log "config after 1st run:"; cat "$CFG" | tee -a smoke.log
           jq '.nodes=[{"id":"smoke","name":"smoke-node","protocol":"SOCKS","address":"127.0.0.1","port":1080,"delay":-1,"active":true,"group":"Custom"}] | .activeNodeID="smoke" | .routingMode="direct"' "$CFG" > cfg.tmp && mv cfg.tmp "$CFG"
-          open -n "$APP"
-          sleep 15
-          PID="$(appPid)"; [ -n "$PID" ] || { log "GUI did not start (2nd)"; exit 1; }
+          open -n --env KNCLOUD_LOG_FILE="$PWD/gui-app.log" "$APP"
+          PID=""
+          for i in $(seq 1 40); do
+            PID="$(appPid)"
+            [ -n "$PID" ] && networksetup -getwebproxy "$SVC" | grep -q "Enabled: Yes" && break
+            sleep 0.5
+          done
+          [ -n "$PID" ] || { log "GUI did not start (2nd)"; cat gui-app.log; exit 1; }
           screencapture -x gui-with-node.png || true
           lsof -nP -iTCP -sTCP:LISTEN -a -p "$PID" | tee -a smoke.log || true
+          log "--- app log ---"; cat gui-app.log | tee -a smoke.log || true
           log "--- system proxy while running ($SVC) ---"
           networksetup -getwebproxy "$SVC" | tee -a smoke.log
           networksetup -getsocksfirewallproxy "$SVC" | tee -a smoke.log
@@ -204,6 +211,7 @@ jobs:
           networksetup -getwebproxy "$SVC" | tee -a smoke.log
           networksetup -getwebproxy "$SVC" | grep -q "Enabled: No" || { log "system proxy NOT restored on quit"; exit 1; }
           log "system proxy restored on quit: OK"
+          log "--- app log (full) ---"; cat gui-app.log | tee -a smoke.log || true
 
       - name: Package .zip and .dmg
         run: |
@@ -232,6 +240,7 @@ jobs:
           path: |
             smoke.log
             gui-*.png
+            gui-app.log
           if-no-files-found: ignore
 
       - name: Create Release

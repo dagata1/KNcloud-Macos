@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -213,6 +214,19 @@ func (utunDevice) StopLink(l stack.LinkEndpoint, wait time.Duration) bool {
 
 // ------------------------- gVisor 链路端点 -------------------------
 
+// utun 收发计数（诊断用：GUI 日志与 CI 端到端测试据此判断包卡在哪一侧）
+var (
+	utunRxPkts    atomic.Int64
+	utunTxPkts    atomic.Int64
+	utunTxErrs    atomic.Int64
+	utunLastTxErr atomic.Value // string
+)
+
+func utunCounters() string {
+	last, _ := utunLastTxErr.Load().(string)
+	return fmt.Sprintf("utun rx=%d tx=%d txErr=%d lastTxErr=%q", utunRxPkts.Load(), utunTxPkts.Load(), utunTxErrs.Load(), last)
+}
+
 type utunLinkEndpoint struct {
 	mtu        uint32
 	file       *os.File
@@ -299,6 +313,7 @@ func (e *utunLinkEndpoint) readLoop(d stack.NetworkDispatcher) {
 		}
 		data := make([]byte, n-4)
 		copy(data, buf[4:n])
+		utunRxPkts.Add(1)
 		deliverIPPacket(d, data)
 	}
 }
@@ -334,8 +349,11 @@ func (e *utunLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip
 			continue
 		}
 		if _, err := e.file.Write(b); err != nil {
+			utunTxErrs.Add(1)
+			utunLastTxErr.Store(err.Error())
 			continue // 写失败丢包，由 TCP 重传
 		}
+		utunTxPkts.Add(1)
 		n++
 	}
 	return n, nil

@@ -392,7 +392,7 @@ func TestDarwinAppTunE2E(t *testing.T) {
 			SocksPort: pickFreeLoopbackPort(), HttpPort: pickFreeLoopbackPort(),
 			DnsServers: "1.1.1.1", MuxEnabled: false,
 		},
-		nodes: []NodeItem{{ID: "n1", Name: "lan-socks", Protocol: "SOCKS", Address: physIP, Port: srvPort, Network: "tcp", Active: true}},
+		nodes:        []NodeItem{{ID: "n1", Name: "lan-socks", Protocol: "SOCKS", Address: physIP, Port: srvPort, Network: "tcp", Active: true}},
 		activeNodeID: "n1",
 	}
 	a.mu.Lock()
@@ -447,6 +447,46 @@ func TestDarwinAppTunE2E(t *testing.T) {
 	ips, rerr := r.LookupHost(ctx, "example.com")
 	cancel()
 	step("relay lookup via %s: %v %v", tunDnsAddr, ips, rerr)
+	diag := func(tag string) {
+		f := a.tap
+		if f == nil {
+			step("%s: forwarder is nil", tag)
+			return
+		}
+		step("%s: dnsFlows=%d dnsDialErr=%d dnsReplies=%d tcp=%d udp=%d | %s | bindIdx=%d upstream=%s",
+			tag, f.dnsFlows.Load(), f.dnsDialErr.Load(), f.dnsReplies.Load(), f.tcpActive.Load(), f.udpActive.Load(),
+			utunCounters(), f.cfg.BindIdx, f.cfg.DNSUpstream)
+	}
+	diag("after relay lookup")
+	// 上游直连（与中继同样绑定物理网卡）：区分「中继没收到」与「上游不通」
+	br := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		d := net.Dialer{Control: bindToIfaceControl(a.tunPhys.IfIndex)}
+		return d.DialContext(ctx, "udp", "223.5.5.5:53")
+	}}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 6*time.Second)
+	bips, berr := br.LookupHost(ctx2, "example.com")
+	cancel2()
+	step("bound(if %d) direct lookup via 223.5.5.5: %v %v", a.tunPhys.IfIndex, bips, berr)
+	for _, c := range [][]string{
+		{"/usr/sbin/netstat", "-rn", "-f", "inet"},
+		{"/sbin/route", "-n", "get", tunDnsAddr},
+		{"/sbin/route", "-n", "get", "223.5.5.5"},
+		{"/sbin/route", "-n", "get", tunGateway},
+		{"/sbin/ifconfig", currentTunDevice().Name()},
+	} {
+		o, err := exec.Command(c[0], c[1:]...).CombinedOutput()
+		if len(o) > 4000 {
+			o = o[:4000]
+		}
+		step("%s: err=%v\n%s", strings.Join(c, " "), err, o)
+	}
+	// TCP 路径单独验证（跳过 DNS）
+	if len(bips) > 0 {
+		o, err := exec.Command("/usr/bin/curl", "-sS", "--noproxy", "*", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "15",
+			"--resolve", "example.com:443:"+bips[0], "https://example.com/").CombinedOutput()
+		step("curl --resolve example.com:443:%s through TUN: %v %s", bips[0], err, o)
+	}
+	diag("after tcp probe")
 	for _, c := range [][]string{
 		{"/usr/bin/dig", "+time=3", "+tries=1", "+short", "example.com"},
 		{"/usr/bin/dscacheutil", "-q", "host", "-a", "name", "example.com"},

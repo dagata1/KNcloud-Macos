@@ -246,6 +246,19 @@ func NewApp() *App {
 
 // addLogInternal 追加一条日志。内部自己加锁（logMu），因此调用方无论是否持有
 // a.mu 都可以安全调用 —— 托盘菜单、并发测速等 goroutine 都会走到这里。
+// logMirrorFile 设置了 KNCLOUD_LOG_FILE 时把运行日志同步追加到该文件（排障 / CI 冒烟用；默认不写盘）。
+var logMirrorFile = sync.OnceValue(func() *os.File {
+	p := os.Getenv("KNCLOUD_LOG_FILE")
+	if p == "" {
+		return nil
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil
+	}
+	return f
+})
+
 func (a *App) addLogInternal(level, message string) {
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
@@ -258,6 +271,9 @@ func (a *App) addLogInternal(level, message string) {
 		Message: message,
 	}
 	a.logs = append(a.logs, item)
+	if f := logMirrorFile(); f != nil {
+		fmt.Fprintf(f, "%s [%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), level, message)
+	}
 	if len(a.logs) > 500 {
 		a.logs = a.logs[len(a.logs)-500:]
 	}

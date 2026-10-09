@@ -66,6 +66,10 @@ type tapForwarder struct {
 	tcpActive atomic.Int64
 	udpActive atomic.Int64
 	dnsActive atomic.Int64
+	// DNS 中继诊断计数：收到的查询流、上游拨号失败、写回 TUN 的应答
+	dnsFlows   atomic.Int64
+	dnsDialErr atomic.Int64
+	dnsReplies atomic.Int64
 }
 
 // tcpCopyBufSize 每方向的拷贝缓冲：巨型帧下 32KB 太小，系统调用次数翻倍
@@ -348,11 +352,16 @@ func (f *tapForwarder) relayDNS(flow *udpFlow, pc *gonet.UDPConn, dst *net.UDPAd
 	if f.cfg.BindIdx != 0 {
 		d.Control = bindToIfaceControl(f.cfg.BindIdx)
 	}
+	f.dnsFlows.Add(1)
 	uc, err := d.Dial("udp", upstream)
-	if err != nil || !flow.add(uc) {
+	if err != nil {
+		f.dnsDialErr.Add(1)
 		return
 	}
-	f.relayPair(flow, f.cfg.DNSIdle, pc, uc, func(b []byte) []byte { return b }, func(b []byte) ([]byte, bool) { return b, true })
+	if !flow.add(uc) {
+		return
+	}
+	f.relayPair(flow, f.cfg.DNSIdle, pc, uc, func(b []byte) []byte { return b }, func(b []byte) ([]byte, bool) { f.dnsReplies.Add(1); return b, true })
 }
 
 // relayUDPSocks 非 DNS 的 UDP（QUIC/游戏/语音等）：SOCKS5 UDP ASSOCIATE 经 Xray 转发。
