@@ -49,6 +49,9 @@ jobs:
           sw_vers; uname -m; go version
           networksetup -listallnetworkservices || true
           route -n get default || true
+          echo "--- reachability of the TUN DNS relay upstream (223.5.5.5) ---"
+          dig @223.5.5.5 +time=2 +tries=1 +short example.com || true
+          dig @8.8.8.8 +time=2 +tries=1 +short example.com || true
 
       - name: go vet
         run: go vet ./...

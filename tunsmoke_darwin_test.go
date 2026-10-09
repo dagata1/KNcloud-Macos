@@ -437,9 +437,30 @@ func TestDarwinAppTunE2E(t *testing.T) {
 			t.Fatalf("system DNS not hijacked: %v", d)
 		}
 	}
+	// 诊断：分别验证 DNS 中继（Go 解析器直连 198.18.0.2）、resolv.conf 路径（dig）、
+	// 系统解析器（mDNSResponder：dscacheutil），以及中继上游本身是否可达
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "udp", tunDnsAddr+":53")
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ips, rerr := r.LookupHost(ctx, "example.com")
+	cancel()
+	step("relay lookup via %s: %v %v", tunDnsAddr, ips, rerr)
+	for _, c := range [][]string{
+		{"/usr/bin/dig", "+time=3", "+tries=1", "+short", "example.com"},
+		{"/usr/bin/dscacheutil", "-q", "host", "-a", "name", "example.com"},
+		{"/usr/sbin/scutil", "--dns"},
+	} {
+		o, err := exec.Command(c[0], c[1:]...).CombinedOutput()
+		if len(o) > 1500 {
+			o = o[:1500]
+		}
+		step("%s: err=%v\n%s", strings.Join(c, " "), err, o)
+	}
 	var code string
-	for i := 0; i < 3 && code != "200"; i++ {
-		o, err := exec.Command("/usr/bin/curl", "-sS", "--noproxy", "*", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "20", "https://example.com/").CombinedOutput()
+	for i := 0; i < 2 && code != "200"; i++ {
+		o, err := exec.Command("/usr/bin/curl", "-sS", "--noproxy", "*", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "15", "https://example.com/").CombinedOutput()
 		code = strings.TrimSpace(string(o))
 		if err != nil {
 			t.Logf("curl attempt %d: %v %s", i+1, err, o)
