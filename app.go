@@ -1194,7 +1194,7 @@ func (a *App) SetRoutingMode(mode string) (bool, error) {
 	defer tray.requestRebuild()
 
 	if a.coreRunning {
-		// 优先就地替换路由规则并切断旧连接（入站不断、keep-alive 连接立即按新策略出站）；
+		// 优先就地替换路由规则（入站不断、已建立的连接保持原出口，新连接按新策略）；
 		// 不可用时才整体重启内核。
 		err := a.applyRoutingLocked()
 		if err != nil && errors.Is(err, errHotSwapUnavailable) {
