@@ -26,8 +26,8 @@ import (
 // *router.Router 放在 atomic.Pointer 里，PickRoute 每次读取当前指针。切换策略时新建一个
 // router.Router 并整体替换，没有「规则表半新半旧」的中间态，也没有数据竞争
 // （Xray 自带的 ReloadRules 是边清空边追加，且 PickRoute 读规则表不加锁）。
-// 换完规则后再按代际关掉旧连接（见 conntrack.go 的 CloseAllBefore），
-// 入站监听与同一实例保持不动，明文 keep-alive 的后续请求自然按新规则路由。
+// 换完规则后入站监听与同一实例保持不动：新连接（含明文 keep-alive 的后续请求）按新规则路由，
+// 已建立的隧道保持原出口不切断（与 v2rayN 一致，进行中的下载不会被打断）。
 //
 // 接入方式：Xray 按配置消息的类型查找构造函数，router.Config 的构造函数已被 Xray 注册，
 // 不能覆盖。所以 startCoreLocked 把配置里的 router.Config 序列化后装进一个

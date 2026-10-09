@@ -833,12 +833,11 @@ func proxyUsesMux(node NodeItem, muxEnabled bool) bool {
 	return muxEnabled && (node.Protocol == "VLESS" || node.Protocol == "VMess" || node.Protocol == "Trojan")
 }
 
-// applyRoutingLocked 按当前 a.routingMode 就地替换运行中内核的路由规则，并切断
-// 按旧策略建立的存量连接（调用方需持有写锁）。返回 errHotSwapUnavailable（可能被包装）
-// 时调用方应回退为整体重启内核。
+// applyRoutingLocked 按当前 a.routingMode 就地替换运行中内核的路由规则（调用方需持有写锁）。
+// 返回 errHotSwapUnavailable（可能被包装）时调用方应回退为整体重启内核。
 //
-// 时序：先换规则，再推进代际并清扫。此后开始的拨号都已按新规则路由；
-// 换规则与推进代际之间按新规则拨出的少量连接会被误关，客户端重连即可，无害。
+// 与 v2rayN 一致：只影响之后新建的连接，已建立的连接保持原出口不切断
+// （例如直连下开始的下载，切到全局后继续直连下完）。
 //
 // 仅 DNS 配置（直连模式换国内 DNS）不随之替换：系统代理路径下 Xray 内置 DNS 没有使用者
 // （路由 domainStrategy=AsIs、freedom 与传输层均不经它解析），TUN 运行时本函数不会被调用。
@@ -868,17 +867,6 @@ func (a *App) applyRoutingLocked() error {
 	}
 	if err := sr.Reload(rc); err != nil {
 		return fmt.Errorf("%w: reload routing: %v", errHotSwapUnavailable, err)
-	}
-	// mux 出站上的子连接不经系统拨号器，记账看不到；换一个同节点的新 handler
-	// 关掉旧 handler 释放其 mux 连接（与换节点同一套流程）。
-	if proxyUsesMux(*node, a.settings.MuxEnabled && a.tunEgressIface == "") {
-		if err := a.hotSwapProxyOutboundLocked(*node); err != nil {
-			return fmt.Errorf("%w: refresh proxy outbound: %v", errHotSwapUnavailable, err)
-		}
-	}
-	cut := outboundConnTracker.Advance()
-	if n := outboundConnTracker.CloseAllBefore(inst, cut); n > 0 {
-		a.addLogInternal("info", fmt.Sprintf("Closed %d connection(s) routed by the previous policy", n))
 	}
 	return nil
 }
