@@ -122,6 +122,47 @@ func removeTunIPv6RouteFast(ifIdx uint32) {
 	}
 }
 
+// scopedPhysDefaultReq 物理网卡的作用域默认路由（route add -net 0.0.0.0/0 <gw> -ifscope en0）。
+//
+// 为什么需要：TUN 挂上 0/1 + 128/1 后，绑定物理网卡（IP_BOUND_IF）的 socket —— DNS 中继、
+// Xray 的 sockopt.interface 出站 —— 在 XNU 里做作用域路由查找：系统只有一条不带作用域的
+// default（主网卡），更具体的 0/1、128/1 又在 utun 上，查找结果与绑定接口不符，connect 直接
+// 报 ENETUNREACH（network is unreachable）。系统偶尔会给非主网卡装 IFSCOPE 默认路由，
+// 但主网卡通常没有。补一条 en0 作用域的默认路由，只影响绑定了 en0 的 socket，不改普通流量走向。
+func scopedPhysDefaultReq(op string, phys physHop) (helperReq, bool) {
+	name := ifaceNameByIndex(phys.IfIndex)
+	if name == "" {
+		return helperReq{}, false
+	}
+	req := helperReq{Op: op, Dst: "0.0.0.0/0", Scope: name}
+	if phys.NextHop == 0 {
+		req.Iface = name
+	} else {
+		req.Gateway = u32ToIP(phys.NextHop).String()
+	}
+	return req, true
+}
+
+// addScopedPhysDefault 装上物理网卡的作用域默认路由（已存在则沿用，不记账也不会删除）。
+func addScopedPhysDefault(phys physHop) error {
+	req, ok := scopedPhysDefaultReq("route_add", phys)
+	if !ok {
+		return fmt.Errorf("physical interface %d not found", phys.IfIndex)
+	}
+	_, err := tunHelper.do(req)
+	return err
+}
+
+// removeScopedPhysDefault 撤销 addScopedPhysDefault 加的路由（助手只删自己加过的）。
+func removeScopedPhysDefault(phys physHop) {
+	if phys.IfIndex == 0 || !tunHelper.connected() {
+		return
+	}
+	if req, ok := scopedPhysDefaultReq("route_del", phys); ok {
+		_, _ = tunHelper.do(req)
+	}
+}
+
 // sweepStaleBypassRoutes Windows 用来清理异常退出残留；macOS 上物理网卡路由由助手记账，
 // 主程序退出（含崩溃）后助手自行撤销，utun 上的路由随网卡消失。
 func sweepStaleBypassRoutes() int { return 0 }

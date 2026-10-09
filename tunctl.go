@@ -308,6 +308,12 @@ func (a *App) tunStartLocked() error {
 	if err != nil {
 		return fail(err)
 	}
+	// 绑定物理网卡的出站（DNS 中继、Xray 出站）在默认路由进 TUN 后仍要能出去（macOS 需要作用域默认路由）
+	if !native {
+		if err := addScopedPhysDefault(phys); err != nil {
+			a.addLogInternal("warn", fmt.Sprintf("TUN: scoped default route on %s not installed: %v", ifc.Name, err))
+		}
+	}
 	tr := time.Now()
 	added, _, err := a.tunRt.sync(a.tunRouteOps(), desired)
 	if err != nil {
@@ -429,6 +435,7 @@ func (a *App) removeTapRouting() {
 	a.tapDnsHijacked = false
 	removeTunIPv6RouteFast(idx)
 	a.tunV6 = false
+	removeScopedPhysDefault(a.tunPhys)
 }
 
 // ------------------------- 换节点 -------------------------

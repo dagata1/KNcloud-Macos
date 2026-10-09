@@ -150,6 +150,9 @@ func TestValidateHelperRoute(t *testing.T) {
 			t.Errorf("%+v accepted", r)
 		}
 	}
+	if got := strings.Join(routeCmdArgs("add", helperRoute{Dst: "0.0.0.0/0", Gateway: "192.168.1.1", Scope: "en0"}), " "); got != "-n add -net 0.0.0.0/0 192.168.1.1 -ifscope en0" {
+		t.Fatalf("scoped default args: %s", got)
+	}
 	args := routeCmdArgs("add", helperRoute{Dst: "0.0.0.0/1", Iface: "utun3"})
 	if strings.Join(args, " ") != "-n add -net 0.0.0.0/1 -interface utun3" {
 		t.Fatalf("route args: %v", args)

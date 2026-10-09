@@ -263,7 +263,11 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool, bridgeAddr string) (map[
 		}, nil
 	}
 
-	stream := map[string]interface{}{"network": node.Network}
+	network := node.Network
+	if network == "" {
+		network = "tcp" // 手写/旧配置里没写 network 的节点（如 SOCKS/HTTP）按 tcp 处理，否则 Xray 拒绝整份配置
+	}
+	stream := map[string]interface{}{"network": network}
 	switch node.Security {
 	case "tls":
 		tls := map[string]interface{}{
@@ -288,7 +292,7 @@ func buildProxyOutbound(node NodeItem, muxEnabled bool, bridgeAddr string) (map[
 		stream["security"] = "none"
 	}
 
-	switch node.Network {
+	switch network {
 	case "ws":
 		ws := map[string]interface{}{"path": firstNonEmpty(node.Path, "/")}
 		if node.HostName != "" {

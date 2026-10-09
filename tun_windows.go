@@ -213,6 +213,11 @@ func adapterHasDns(ifIdx uint32, want string) bool {
 // PowerShell 的 Remove-NetRoute 走新版 IP Helper，断开网卡同样能删，且一条命令搞定。
 //
 // 该网卡由本程序专用（TAP 常驻），其上路由全部由本程序写入，可整体清空。
+// addScopedPhysDefault / removeScopedPhysDefault 只有 macOS 需要（IP_BOUND_IF 的作用域路由，
+// 见 tun_darwin.go）；Windows 的 IP_UNICAST_IF 不受 TUN 默认路由影响。
+func addScopedPhysDefault(phys physHop) error { return nil }
+func removeScopedPhysDefault(phys physHop)    {}
+
 func removeTapRoutesBulk(ifIdx uint32) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

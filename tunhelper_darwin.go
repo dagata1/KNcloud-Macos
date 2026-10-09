@@ -47,6 +47,7 @@ type helperReq struct {
 	Dst     string   `json:"dst,omitempty"` // CIDR
 	Gateway string   `json:"gw,omitempty"`
 	Iface   string   `json:"iface,omitempty"`
+	Scope   string   `json:"scope,omitempty"` // 非空：-ifscope 该接口（只对绑定了该接口的 socket 生效的作用域路由）
 	V6      bool     `json:"v6,omitempty"`
 	DNS     []string `json:"dns,omitempty"`
 }
@@ -133,8 +134,8 @@ func readHelperFrame(c *net.UnixConn, v any) (fds []int, err error) {
 // ------------------------- 助手（root 进程） -------------------------
 
 type helperRoute struct {
-	Dst, Gateway, Iface string
-	V6                  bool
+	Dst, Gateway, Iface, Scope string
+	V6                         bool
 }
 
 type tunHelperServer struct {
@@ -354,6 +355,12 @@ func validateHelperRoute(req helperReq) (helperRoute, error) {
 	default:
 		return helperRoute{}, errors.New("route needs a gateway or an interface")
 	}
+	if req.Scope != "" {
+		if !ifaceNameRe.MatchString(req.Scope) {
+			return helperRoute{}, fmt.Errorf("bad scope interface %q", req.Scope)
+		}
+		r.Scope = req.Scope
+	}
 	return r, nil
 }
 
@@ -367,6 +374,9 @@ func routeCmdArgs(verb string, r helperRoute) []string {
 		args = append(args, "-interface", r.Iface)
 	} else {
 		args = append(args, r.Gateway)
+	}
+	if r.Scope != "" {
+		args = append(args, "-ifscope", r.Scope)
 	}
 	return args
 }

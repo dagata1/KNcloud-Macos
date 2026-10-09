@@ -187,7 +187,7 @@ jobs:
 
           log "=== 2nd launch with a seeded node (direct mode) ==="
           log "config after 1st run:"; cat "$CFG" | tee -a smoke.log
-          jq '.nodes=[{"id":"smoke","name":"smoke-node","protocol":"SOCKS","address":"127.0.0.1","port":1080,"delay":-1,"active":true,"group":"Custom"}] | .activeNodeID="smoke" | .routingMode="direct"' "$CFG" > cfg.tmp && mv cfg.tmp "$CFG"
+          jq '.nodes=[{"id":"smoke","name":"smoke-node","protocol":"SOCKS","address":"127.0.0.1","port":1080,"network":"tcp","delay":-1,"active":true,"group":"Custom"}] | .activeNodeID="smoke" | .routingMode="direct"' "$CFG" > cfg.tmp && mv cfg.tmp "$CFG"
           open -n --env KNCLOUD_LOG_FILE="$PWD/gui-app.log" "$APP"
           PID=""
           for i in $(seq 1 40); do
