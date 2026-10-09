@@ -730,6 +730,18 @@ export default function App() {
         confirmDeleteNodes();
         return;
       }
+      // Enter：节点列表选中单个节点时启用它
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && activeTab === "servers"
+          && selectedNodeIds.length === 1 && !showAddNodeModal && !showImportModal && !switchingNodeId) {
+        const t = e.target;
+        const tag = ((t && t.tagName) || "").toLowerCase();
+        if (tag !== "input" && tag !== "textarea" && tag !== "select" && tag !== "button" && !(t && t.isContentEditable)) {
+          e.preventDefault();
+          const target = nodes.find(n => n.id === selectedNodeIds[0]);
+          if (target && !target.active) handleSelectNode(target.id);
+          return;
+        }
+      }
       // Ctrl+A 节点列表全选
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "a" || e.key === "A")) {
         if (activeTab === "servers") {
@@ -877,7 +889,7 @@ export default function App() {
       window.removeEventListener('mouseup', onUp);
       if (d && d.timer) clearInterval(d.timer);
       if (d && d.active) {
-        suppressClickRef.current = true; // 拖完松手不要触发卡片点击（切换节点）
+        suppressClickRef.current = true; // 拖完松手不要触发卡片点击（单选）
         setTimeout(() => { suppressClickRef.current = false; }, 0);
       }
       dragRef.current = null;
@@ -1655,11 +1667,11 @@ export default function App() {
                   <h1 className="content-title">节点列表</h1>
                   {selectedNodeIds.length > 0 ? (
                     <p className="content-subtitle">
-                      已选中 {selectedNodeIds.length} 个节点 · 按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 批量测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Delete</kbd> 删除 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Esc</kbd> 取消选择
+                      已选中 {selectedNodeIds.length} 个节点 · {selectedNodeIds.length === 1 && (<><kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Enter</kbd> 启用 · </>)}按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 批量测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Delete</kbd> 删除 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Esc</kbd> 取消选择
                     </p>
                   ) : (
                     <p className="content-subtitle">
-                      快捷键：<kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+A</kbd> 全选 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+点击</kbd> 或拖动框选
+                      快捷键：单击选中 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Enter</kbd> 启用 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+A</kbd> 全选 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+点击</kbd> 或拖动框选
                     </p>
                   )}
                 </div>
@@ -1758,8 +1770,8 @@ export default function App() {
                             return;
                           }
                         }
+                        // 单击只选中；选中单个后按 Enter 才启用（主要切换入口在主页快速选择）
                         setSelectedNodeIds([node.id]);
-                        handleSelectNode(node.id);
                       }}
                       style={{
                         display: 'flex',
