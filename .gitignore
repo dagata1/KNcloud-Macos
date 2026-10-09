@@ -13,3 +13,8 @@ wintun.dll
 third_party/
 cores/native/share/
 KNcloud-WIN-test.exe
+
+# macOS packaging / CI scratch
+dmgroot/
+*.log
+gui-screenshot.png
