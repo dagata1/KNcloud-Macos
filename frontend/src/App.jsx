@@ -40,6 +40,7 @@ import {
   LoaderCircle,
   Gauge,
   LogOut,
+  CircleHelp,
 } from 'lucide-react';
 
 import {
@@ -1662,76 +1663,36 @@ export default function App() {
           {/* TAB 2: SERVERS (NODES) */}
           {activeTab === 'servers' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div className="content-header" style={{ marginBottom: '4px' }}>
-                <div>
-                  <h1 className="content-title">节点列表</h1>
-                  {selectedNodeIds.length > 0 ? (
-                    <p className="content-subtitle">
-                      已选中 {selectedNodeIds.length} 个节点 · {selectedNodeIds.length === 1 && (<><kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Enter</kbd> 启用 · </>)}按 <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 批量测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Delete</kbd> 删除 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Esc</kbd> 取消选择
-                    </p>
-                  ) : (
-                    <p className="content-subtitle">
-                      快捷键：单击选中 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Enter</kbd> 启用 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+A</kbd> 全选 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+R</kbd> 测速 · <kbd style={{ background: 'var(--bg-card)', padding: '1px 5px', borderRadius: '3px', border: '1px solid var(--border-subtle)' }}>Ctrl+点击</kbd> 或拖动框选
-                    </p>
+              <div className="content-header" style={{ marginBottom: '4px', alignItems: 'center', gap: '16px' }}>
+                <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h1 className="content-title" style={{ margin: 0 }}>节点列表</h1>
+                  {/* 操作说明收进 ?：悬停（桌面）或点击显示 */}
+                  <span className="help-pop" tabIndex={0} aria-label="操作说明">
+                    <CircleHelp size={15} />
+                    <span className="help-pop-body" role="tooltip">
+                      <b>操作说明</b>
+                      <span>单击选中，再点一次取消</span>
+                      <span>点复选框、Ctrl+点击或拖动框选：多选</span>
+                      <span><kbd>Enter</kbd> 启用选中的节点（仅选中一个时）</span>
+                      <span><kbd>Ctrl+A</kbd> 全选 · <kbd>Esc</kbd> 取消选择</span>
+                      <span><kbd>Ctrl+R</kbd> 测速选中节点（<kbd>Ctrl+A</kbd> 后按即全部测速）</span>
+                      <span><kbd>Delete</kbd> 删除选中节点</span>
+                      <span><kbd>Ctrl+C</kbd> 复制当前节点链接 · <kbd>Ctrl+V</kbd> 从剪贴板导入</span>
+                      <span className="help-pop-note">切换节点主要在仪表盘的快速选择里进行</span>
+                    </span>
+                  </span>
+                  {selectedNodeIds.length > 0 && (
+                    <span className="sel-count">已选 {selectedNodeIds.length}</span>
                   )}
                 </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  {selectedNodeIds.length > 0 ? (
-                    <>
-                      <button
-                        className="win11-btn primary"
-                        onClick={handlePingSelected}
-                        disabled={isPingingAll}
-                        title="真连接测速所有选中的节点（快捷键 Ctrl+R）"
-                      >
-                        {isPingingAll ? <LoaderCircle size={13} className="spin" /> : <Gauge size={13} />}
-                        <span>{isPingingAll ? '测速中…' : `测速选中 (${selectedNodeIds.length})`}</span>
-                      </button>
-                      <button
-                        className="win11-btn danger"
-                        onClick={() => setDeleteConfirmIds([...selectedNodeIds])}
-                        title="删除所有选中的节点（快捷键 Delete）"
-                      >
-                        <Trash2 size={13} />
-                        <span>删除选中</span>
-                      </button>
-                      <button
-                        className="win11-btn"
-                        onClick={() => setSelectedNodeIds([])}
-                        title="取消多选（快捷键 Esc）"
-                      >
-                        <span>取消选择</span>
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        className="win11-btn"
-                        onClick={() => {
-                          const allIds = filteredNodes.map(n => n.id);
-                          setSelectedNodeIds(allIds);
-                          showToast(`已全选 ${allIds.length} 个节点（按 Ctrl+R 测速）`, 'info');
-                        }}
-                        title="全选当前列表节点（快捷键 Ctrl+A）"
-                      >
-                        <span>全选节点</span>
-                      </button>
-                      <button
-                        className="win11-btn"
-                        onClick={handlePingAll}
-                        disabled={isPingingAll}
-                        title="全部节点真连接测速"
-                      >
-                        {isPingingAll ? <LoaderCircle size={13} className="spin" /> : <Zap size={13} />}
-                        <span>{isPingingAll ? '测速中…' : '全部测速'}</span>
-                      </button>
-                    </>
-                  )}
-                  <button className="win11-btn primary" onClick={() => setShowAddNodeModal(true)} title="手动添加单个节点">
-                    <Plus size={13} />
-                    <span>添加节点</span>
-                  </button>
-                </div>
+                <button
+                  className="win11-btn primary icon-only"
+                  onClick={() => setShowAddNodeModal(true)}
+                  title="添加节点"
+                  aria-label="添加节点"
+                >
+                  <Plus size={16} />
+                </button>
               </div>
 
               {/* Nodes List */}
@@ -1769,8 +1730,8 @@ export default function App() {
                             return;
                           }
                         }
-                        // 单击只选中；选中单个后按 Enter 才启用（主要切换入口在主页快速选择）
-                        setSelectedNodeIds([node.id]);
+                        // 单击只选中，再点一次取消；选中单个后按 Enter 才启用（主要切换入口在主页快速选择）
+                        setSelectedNodeIds(ids => (ids.length === 1 && ids[0] === node.id) ? [] : [node.id]);
                       }}
                       style={{
                         display: 'flex',
@@ -1793,9 +1754,22 @@ export default function App() {
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1 }}>
                         {/* 节点列表主要用来编辑 / 批量操作：用复选框表示选中，不用单选圆点（启用节点在主页快速选择） */}
-                        <div style={{
+                        <div
+                          role="checkbox"
+                          aria-checked={isSelected}
+                          title={isSelected ? '取消选择' : '加入选择'}
+                          onClick={(e) => {
+                            // 复选框：加选 / 减选（多选），不影响其它已选节点
+                            e.stopPropagation();
+                            if (suppressClickRef.current) return;
+                            setSelectedNodeIds(ids => ids.includes(node.id)
+                              ? ids.filter(x => x !== node.id)
+                              : [...ids, node.id]);
+                          }}
+                          style={{
                           width: '16px',
                           height: '16px',
+                          cursor: 'pointer',
                           flexShrink: 0,
                           borderRadius: '4px',
                           border: isSelected ? '1px solid var(--accent)' : '1.5px solid var(--border-default)',
@@ -2249,7 +2223,7 @@ export default function App() {
                   value={newNode.protocol}
                   onChange={e => setNewNode({ ...newNode, protocol: e.target.value })}
                 >
-                  <option value="VLESS">VLESS (推荐)</option>
+                  <option value="VLESS">VLESS</option>
                   <option value="VMess">VMess</option>
                   <option value="Trojan">Trojan</option>
                   <option value="Hysteria2">Hysteria2</option>

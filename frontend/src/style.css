@@ -1728,3 +1728,22 @@ select.win11-input option {
 .update-progress-msg { font-size: 12px; color: var(--text-secondary); }
 .update-progress-msg.error { color: #d13438; }
 .dark-theme .update-progress-msg.error { color: #ff99a4; }
+
+/* 节点列表标题栏只留一个 + 按钮 */
+.win11-btn.icon-only { width: 32px; height: 32px; padding: 0; justify-content: center; flex-shrink: 0; }
+
+/* 标题旁的 ? 说明弹层：桌面悬停，触屏点击（focus） */
+.help-pop { position: relative; display: inline-flex; align-items: center; color: var(--text-tertiary, #8a8a8a); cursor: help; outline: none; }
+.help-pop:hover, .help-pop:focus { color: var(--text-primary); }
+.help-pop-body {
+  display: none; position: absolute; top: calc(100% + 8px); left: -8px; z-index: 50;
+  width: max-content; max-width: 320px; flex-direction: column; gap: 6px;
+  padding: 12px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; font-weight: 400;
+  color: var(--text-secondary, #c8c8c8); background: var(--bg-card); border: 1px solid var(--border-subtle);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+.help-pop:hover .help-pop-body, .help-pop:focus .help-pop-body, .help-pop:focus-within .help-pop-body { display: flex; }
+.help-pop-body b { color: var(--text-primary); font-size: 12px; margin-bottom: 2px; }
+.help-pop-body kbd { font-family: inherit; font-size: 11px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border-subtle); background: var(--bg-base, rgba(0,0,0,0.2)); }
+.help-pop-note { color: var(--text-tertiary, #8a8a8a); margin-top: 2px; }
+.sel-count { font-size: 12px; color: var(--accent); background: var(--accent-subtle); border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
