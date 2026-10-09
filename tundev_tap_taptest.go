@@ -1,4 +1,4 @@
-//go:build taptest
+//go:build taptest && windows
 
 package main
 

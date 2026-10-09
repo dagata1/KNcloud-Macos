@@ -17,11 +17,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"time"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 // tunPolicy TUN 的路由/分流策略：固定为全局（TUN 模式 = 全局接管）。
@@ -31,7 +27,7 @@ func (a *App) tunRouteOps() routeOps {
 	if a.tunOps != nil {
 		return a.tunOps
 	}
-	return winRouteOps{}
+	return defaultRouteOps()
 }
 
 func (a *App) activeNodeLocked() *NodeItem {
@@ -173,6 +169,13 @@ func pickFreeLoopbackPort() int {
 // 开：以全局策略接管整机流量（与用户保存的分流策略无关，也不改写它）；
 // 关：回到系统代理模式，按用户保存的分流策略运行。
 func (a *App) SimpleConnect(start bool) (bool, error) {
+	if start {
+		// macOS：先在锁外拉起特权助手（可能弹出管理员授权框）；Windows 为空操作
+		if err := prepareTunPrivileges(); err != nil {
+			a.addLogInternal("error", "TUN: "+err.Error())
+			return false, err
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if start {
@@ -366,7 +369,7 @@ func (a *App) suspendSystemProxyForTunLocked() {
 	if !a.systemProxy {
 		return
 	}
-	if err := setWindowsSystemProxy(false, ""); err != nil {
+	if err := setSystemProxy(false, ""); err != nil {
 		a.addLogInternal("warn", fmt.Sprintf("TUN: failed to pause Windows system proxy: %v", err))
 		return
 	}
@@ -390,7 +393,7 @@ func (a *App) resumeSystemProxyAfterTunLocked() {
 		return
 	}
 	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
-	if err := setWindowsSystemProxy(true, server); err != nil {
+	if err := setSystemProxy(true, server); err != nil {
 		a.addLogInternal("error", fmt.Sprintf("Failed to restore Windows system proxy after TUN: %v", err))
 		return
 	}
@@ -426,22 +429,6 @@ func (a *App) removeTapRouting() {
 	a.tapDnsHijacked = false
 	removeTunIPv6RouteFast(idx)
 	a.tunV6 = false
-}
-
-// setTapAdapterDNS 网卡 DNS 指向劫持地址（netsh 写错参数时退出码仍为 0，必须回读校验）。
-func setTapAdapterDNS(ifIdx uint32) error {
-	if adapterHasDns(ifIdx, tunDnsAddr) {
-		return nil
-	}
-	out, err := runHidden("netsh", "interface", "ipv4", "set", "dnsservers",
-		fmt.Sprintf("name=%d", ifIdx), "source=static", fmt.Sprintf("address=%s", tunDnsAddr), "validate=no")
-	if err != nil {
-		return fmt.Errorf("failed to configure adapter DNS: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	if !adapterHasDns(ifIdx, tunDnsAddr) {
-		return fmt.Errorf("adapter DNS not applied (want %s on ifIdx=%d): %s", tunDnsAddr, ifIdx, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // ------------------------- 换节点 -------------------------
@@ -564,73 +551,3 @@ func (a *App) tunHardSwitchLocked(node NodeItem) error {
 }
 
 // ------------------------- 残留清扫 -------------------------
-
-var (
-	procGetIpForwardTable2 = iphlpapi.NewProc("GetIpForwardTable2")
-)
-
-// listRoutes2 枚举系统 IPv4 路由（新版 API，断开网卡上的路由也可见）。
-func listRoutes2() ([]mibIPForwardRow2, error) {
-	var tbl uintptr
-	r, _, _ := procGetIpForwardTable2.Call(windows.AF_INET, uintptr(unsafe.Pointer(&tbl)))
-	if r != 0 {
-		return nil, windows.Errno(r)
-	}
-	defer procFreeMibTable.Call(tbl)
-	n := *(*uint32)(unsafe.Pointer(tbl))
-	const rowSize = unsafe.Sizeof(mibIPForwardRow2{})
-	base := tbl + 8 // NumEntries 后按 8 字节对齐
-	rows := make([]mibIPForwardRow2, n)
-	for i := uint32(0); i < n; i++ {
-		rows[i] = *(*mibIPForwardRow2)(unsafe.Pointer(base + uintptr(i)*rowSize))
-	}
-	return rows, nil
-}
-
-func row2ToEntry(row mibIPForwardRow2) (routeEntry, bool) {
-	if *(*uint16)(unsafe.Pointer(&row.DestinationPrefix[0])) != windows.AF_INET {
-		return routeEntry{}, false
-	}
-	var dest, hop [4]byte
-	copy(dest[:], row.DestinationPrefix[4:8])
-	copy(hop[:], row.NextHop[4:8])
-	return routeEntry{
-		routeKey: routeKey{Dest: ipToU32(dest[:]), Bits: row.DestinationPrefix[28], NextHop: ipToU32(hop[:]), IfIndex: row.InterfaceIndex},
-		Metric:   row.Metric,
-	}, true
-}
-
-// sweepStaleBypassRoutes 清掉上次异常退出残留在物理网卡上的绕过路由。
-// TUN 网卡上的路由随适配器消失，但物理网卡上的几千条 CN 网段会一直留到重启；
-// 物理网关一旦变化（换 Wi-Fi）它们就指向错误网关。只删同时满足「我们的 metric 标记、
-// NETMGMT 来源、前缀属于内置 CN/私网集合」的路由，不会误删用户自己的静态路由。
-func sweepStaleBypassRoutes() int {
-	rows, err := listRoutes2()
-	if err != nil {
-		return 0
-	}
-	ours := map[[2]uint32]bool{}
-	for _, c := range cnCIDRs() {
-		r := newRoute(c, 0, 0, 0, "")
-		ours[[2]uint32{r.Dest, uint32(r.Bits)}] = true
-	}
-	for _, s := range privateBypassCIDRs {
-		_, c, _ := net.ParseCIDR(s)
-		r := newRoute(*c, 0, 0, 0, "")
-		ours[[2]uint32{r.Dest, uint32(r.Bits)}] = true
-	}
-	n := 0
-	for _, row := range rows {
-		if row.Protocol != ipProtoNetMgmt || (row.Metric != bypassRouteMetric && row.Metric != privateRouteMetric) {
-			continue
-		}
-		e, ok := row2ToEntry(row)
-		if !ok || !ours[[2]uint32{e.Dest, uint32(e.Bits)}] {
-			continue
-		}
-		if (winRouteOps{}).DeleteRoute(e) == nil {
-			n++
-		}
-	}
-	return n
-}

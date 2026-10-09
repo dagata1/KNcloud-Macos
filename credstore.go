@@ -6,12 +6,6 @@ import (
 	"strings"
 )
 
-// secretPrefix 标记该字段已加密。
-//
-// 带版本号是为了将来更换加密方式时仍能识别旧格式：解密侧按前缀分派，
-// 老配置不会因为升级而变成一串无法解析的乱码。
-const secretPrefix = "dpapi:v1:"
-
 // secretEntropy 是参与加解密的应用固有熵值。
 //
 // 它不是密钥（DPAPI 的密钥由 Windows 按当前用户派生），作用是把密文绑定到

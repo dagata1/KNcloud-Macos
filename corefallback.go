@@ -61,7 +61,7 @@ func (a *App) noteCoreFailureLocked(err error) {
 	a.coreErr = err.Error()
 	a.corePortErr = looksLikePortInUse(err)
 	if !a.tunRunning && a.systemProxy {
-		if perr := setWindowsSystemProxy(false, ""); perr == nil {
+		if perr := setSystemProxy(false, ""); perr == nil {
 			a.systemProxy = false
 			a.sysProxyPending = true
 			a.addLogInternal("warn", "Core is not running: system proxy temporarily disabled, it will be restored once the core is back")
@@ -78,7 +78,7 @@ func (a *App) markCoreRunningLocked(applyProxy bool) {
 		return
 	}
 	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
-	if err := setWindowsSystemProxy(true, server); err != nil {
+	if err := setSystemProxy(true, server); err != nil {
 		a.addLogInternal("error", fmt.Sprintf("Failed to re-enable system proxy: %v", err))
 		return
 	}

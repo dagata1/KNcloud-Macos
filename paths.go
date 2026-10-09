@@ -38,7 +38,7 @@ func exeDir() string {
 
 // legacyConfigDir 是旧版（单 exe）使用的 %APPDATA%\KNcloud。
 func legacyConfigDir() (string, error) {
-	base, err := os.UserConfigDir()
+	base, err := userConfigBaseDir()
 	if err != nil {
 		base, err = os.UserHomeDir()
 		if err != nil {
@@ -53,7 +53,7 @@ func legacyConfigDir() (string, error) {
 // go test 产生的临时测试程序不算（避免测试往临时目录乱写或吃掉真实配置）。
 func portableRoot() string {
 	dataRootOnce.Do(func() {
-		if os.Getenv("KNCLOUD_NO_PORTABLE") != "" {
+		if !portableModeSupported || os.Getenv("KNCLOUD_NO_PORTABLE") != "" {
 			return
 		}
 		dir := exeDir()
@@ -151,7 +151,7 @@ func appLogDir() (string, error) {
 
 // resourceSearchDirs 运行资源的查找顺序：<exe目录>\bin 优先；其余是开发/测试时的源码目录。
 func resourceSearchDirs(sub ...string) []string {
-	var dirs []string
+	dirs := platformResourceDirs()
 	if d := exeDir(); d != "" {
 		dirs = append(dirs, filepath.Join(d, "bin"), d)
 	}

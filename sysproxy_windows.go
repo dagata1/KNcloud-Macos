@@ -42,7 +42,7 @@ func notifyInternetSettingsChanged() {
 	}
 }
 
-func setWindowsSystemProxy(enable bool, server string) error {
+func setSystemProxy(enable bool, server string) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -88,10 +88,10 @@ func restoreSystemProxyIfOurs() {
 	if err1 != nil || err2 != nil || enabled != 1 || !strings.EqualFold(strings.TrimSpace(server), ours) {
 		return
 	}
-	setWindowsSystemProxy(false, "")
+	setSystemProxy(false, "")
 }
 
-func getWindowsSystemProxy() bool {
+func getSystemProxy() bool {
 	k, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.QUERY_VALUE)
 	if err != nil {
 		return false

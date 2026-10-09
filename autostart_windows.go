@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -15,23 +13,6 @@ const (
 	// 会在任务管理器里留下一条永远启动失败的死项，所以写新值时顺手清掉。
 	legacyRunValueName = "KNcloud"
 )
-
-var errNoExecutablePath = errors.New("cannot resolve current executable path")
-
-// currentExecutablePath 返回当前进程的可执行文件绝对路径（解析软链接后）。
-func currentExecutablePath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-	if exe == "" {
-		return "", errNoExecutablePath
-	}
-	return exe, nil
-}
 
 // isAutoStartEnabled 检查当前用户登录自启项是否已指向本程序。
 func isAutoStartEnabled() bool {

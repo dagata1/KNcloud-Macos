@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -190,10 +189,6 @@ func (a *App) stopWebLoginSession(id int64) {
 		return // 已被更新的 session 取代，不动
 	}
 	m.stopLocked()
-}
-
-func openInDefaultBrowser(rawURL string) error {
-	return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
 }
 
 // webLoginHTML 回调落地页：告知用户授权结果并引导返回客户端。

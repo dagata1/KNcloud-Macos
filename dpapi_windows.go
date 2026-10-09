@@ -130,3 +130,9 @@ func protectDataOpen(enc, entropy []byte) ([]byte, error) {
 	defer out.free()
 	return out.bytes(), nil
 }
+
+// secretPrefix 标记该字段已加密。
+//
+// 带版本号是为了将来更换加密方式时仍能识别旧格式：解密侧按前缀分派，
+// 老配置不会因为升级而变成一串无法解析的乱码。
+const secretPrefix = "dpapi:v1:"

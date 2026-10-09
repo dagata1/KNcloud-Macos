@@ -170,7 +170,7 @@ type App struct {
 func NewApp() *App {
 	app := &App{
 		coreRunning:  false,
-		systemProxy:  getWindowsSystemProxy(),
+		systemProxy:  getSystemProxy(),
 		routingMode:  "bypass-cn",
 		activeNodeID: "",
 		settings: AppSettings{
@@ -353,13 +353,13 @@ func (a *App) startup(ctx context.Context) {
 		if a.quitting.Load() {
 			return
 		}
-		err := setWindowsSystemProxy(true, server)
+		err := setSystemProxy(true, server)
 		a.mu.Lock()
 		if err != nil {
 			a.addLogInternal("error", fmt.Sprintf("Failed to auto-enable system proxy: %v", err))
 		} else if a.quitting.Load() || a.cleaned.Load() {
 			// 退出清理已经跑过：别把系统代理留在开启状态
-			setWindowsSystemProxy(false, "")
+			setSystemProxy(false, "")
 		} else {
 			a.systemProxy = true
 			a.addLogInternal("info", fmt.Sprintf("System proxy auto-enabled -> %s", server))
@@ -1103,7 +1103,7 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 		a.coreRunning = true
 		a.markCoreRunningLocked(false)
 		if a.systemProxy {
-			setWindowsSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort))
+			setSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort))
 		}
 	}
 	if !start {
@@ -1118,7 +1118,7 @@ func (a *App) ToggleCore(start bool) (bool, error) {
 		a.traffic.resetSpeed()
 		a.addLogInternal("warn", "Core stopped, no longer forwarding traffic")
 		if a.systemProxy {
-			setWindowsSystemProxy(false, "")
+			setSystemProxy(false, "")
 		}
 	}
 	a.savePersisted()
@@ -1137,7 +1137,7 @@ func (a *App) ToggleSystemProxy(enable bool) (bool, error) {
 		return a.systemProxy, nil
 	}
 	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
-	if err := setWindowsSystemProxy(enable, server); err != nil {
+	if err := setSystemProxy(enable, server); err != nil {
 		a.addLogInternal("error", fmt.Sprintf("Failed to set Windows system proxy: %v", err))
 		return a.systemProxy, err
 	}
@@ -1483,7 +1483,7 @@ func (a *App) SaveSettings(settings AppSettings) error {
 	}
 	// 系统代理开着且 HTTP 端口变了，需要刷新注册表
 	if a.systemProxy && old.HttpPort != settings.HttpPort {
-		setWindowsSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", settings.HttpPort))
+		setSystemProxy(true, fmt.Sprintf("127.0.0.1:%d", settings.HttpPort))
 	}
 	// 内核之前因端口被占用没起来，用户改了端口：按新端口重新拉起
 	portsChanged := old.SocksPort != settings.SocksPort || old.HttpPort != settings.HttpPort
@@ -1547,7 +1547,7 @@ func (a *App) shutdown(budget time.Duration) {
 		a.systemProxy = false
 		wl := a.webLogin
 		if proxyOn {
-			setWindowsSystemProxy(false, "")
+			setSystemProxy(false, "")
 		}
 		a.stopCoreLocked()
 		a.coreRunning = false // 软停 TUN 时不要再把内核拉起来
@@ -1665,9 +1665,7 @@ func (a *App) WindowMax() {
 }
 
 func (a *App) WindowClose() {
-	if ctx := a.appCtx(); ctx != nil {
-		runtime.Quit(ctx)
-	}
+	a.windowCloseRequested()
 }
 
 func (a *App) IsWindowMaximized() bool {
