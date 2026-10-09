@@ -22,6 +22,8 @@ export function GetAppVersion():Promise<string>;
 
 export function GetCoreStatus():Promise<main.CoreStatus>;
 
+export function GetPlatform():Promise<string>;
+
 export function GetLogs():Promise<Array<main.LogItem>>;
 
 export function GetNodes():Promise<Array<main.NodeItem>>;

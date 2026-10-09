@@ -42,6 +42,10 @@ export function GetCoreStatus() {
   return window['go']['main']['App']['GetCoreStatus']();
 }
 
+export function GetPlatform() {
+  return window['go']['main']['App']['GetPlatform']();
+}
+
 export function GetLogs() {
   return window['go']['main']['App']['GetLogs']();
 }

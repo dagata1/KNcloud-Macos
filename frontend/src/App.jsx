@@ -79,13 +79,19 @@ import {
   SaveSettings,
   WindowMin,
   WindowMax,
-  WindowClose
+  WindowClose,
+  GetPlatform
 } from '../wailsjs/go/main/App';
 import { EventsOn, WindowSetSize, WindowUnmaximise, BrowserOpenURL } from '../wailsjs/runtime';
 
 const protoLabel = (n) => (n.protocol === 'HTTP' && n.security === 'tls') ? 'HTTPS' : n.protocol;
 
 export default function App() {
+  // 运行平台（Go 端 GetPlatform）：macOS 上替换 Windows 专属文案（托盘、管理员、开机自启）
+  const [platform, setPlatform] = useState('windows');
+  useEffect(() => { GetPlatform().then(p => p && setPlatform(p)).catch(() => {}); }, []);
+  const isMac = platform === 'darwin';
+  const productName = isMac ? 'KNcloud' : 'KNcloud-WIN';
   // 简易模式内容少，窗口切到紧凑尺寸；普通模式恢复默认大小
   // （全局最小尺寸在 main.go 里放开了到 380x560，这里的目标值在其之上）
   const WINDOW_SIZE = { simple: { w: 420, h: 640 }, classic: { w: 1120, h: 760 } };
@@ -288,7 +294,7 @@ export default function App() {
 
   // 关闭按钮的语义取决于「关闭窗口时最小化到托盘」开关
   const closeWindowTitle = settings.minimizeToTray
-    ? '关闭（最小化到系统托盘）'
+    ? (isMac ? '关闭（隐藏到后台，点 Dock 图标恢复）' : '关闭（最小化到系统托盘）')
     : '关闭并退出程序';
 
   const refreshAllData = async () => {
@@ -1194,7 +1200,7 @@ export default function App() {
       <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
         <header className="titlebar drag-region">
           <div className="titlebar-left">
-            <img src={brandLogo} alt="KNcloud-WIN" style={{ height: "22px", width: "auto", display: "block" }} />
+            <img src={brandLogo} alt={productName} style={{ height: "22px", width: "auto", display: "block" }} />
           </div>
           <div className="titlebar-right no-drag">
             <button className="theme-toggle-btn" onClick={handleUiModeToggle} title="切换到普通模式（完整设置）">
@@ -1361,7 +1367,7 @@ export default function App() {
       {/* Windows 11 TitleBar */}
       <header className="titlebar drag-region">
         <div className="titlebar-left">
-          <img src={brandLogo} alt="KNcloud-WIN" style={{ height: "22px", width: "auto", display: "block" }} />
+          <img src={brandLogo} alt={productName} style={{ height: "22px", width: "auto", display: "block" }} />
         </div>
 
 
@@ -1574,7 +1580,7 @@ export default function App() {
                       { id: 'bypass-cn', label: '绕过大陆' },
                       { id: 'global', label: '全局代理' },
                       { id: 'direct', label: '全局直连' },
-                      { id: 'tun', label: 'TUN 模式', title: '虚拟网卡全局接管整机流量（需管理员权限）' },
+                      { id: 'tun', label: 'TUN 模式', title: isMac ? '虚拟网卡（utun）全局接管整机流量（首次开启需输入管理员密码授权）' : '虚拟网卡全局接管整机流量（需管理员权限）' },
                     ].map(m => (
                       <button
                         key={m.id}
@@ -2085,12 +2091,12 @@ export default function App() {
 
               {/* Group 4: 系统托盘与开机启动 */}
               <div className="win11-card" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                <h3 style={{ fontSize: '14px', fontWeight: 600 }}>系统托盘与开机启动</h3>
+                <h3 style={{ fontSize: '14px', fontWeight: 600 }}>{isMac ? '后台运行与登录启动' : '系统托盘与开机启动'}</h3>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <div style={{ fontSize: '13px', fontWeight: 500 }}>开机自动启动</div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{isMac ? '登录时自动启动' : '开机自动启动'}</div>
                     <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                      登录 Windows 后自动启动 KNcloud-WIN，方便随时接管代理
+                      {isMac ? '登录 macOS 后自动启动 KNcloud（写入 ~/Library/LaunchAgents），方便随时接管代理' : '登录 Windows 后自动启动 KNcloud-WIN，方便随时接管代理'}
                     </div>
                   </div>
                   <label className="win11-toggle">
@@ -2121,9 +2127,9 @@ export default function App() {
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <div style={{ fontSize: '13px', fontWeight: 500 }}>关闭窗口时最小化到托盘</div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{isMac ? '关闭窗口时隐藏到后台' : '关闭窗口时最小化到托盘'}</div>
                     <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                      关闭主窗口后程序继续在右下角托盘运行；右键托盘图标可切换模式、切换节点或退出
+                      {isMac ? '关闭主窗口后程序继续在后台运行；点 Dock 图标恢复窗口，顶部菜单栏「代理」菜单可切换模式、切换节点，Cmd+Q 退出' : '关闭主窗口后程序继续在右下角托盘运行；右键托盘图标可切换模式、切换节点或退出'}
                     </div>
                   </div>
                   <label className="win11-toggle">
