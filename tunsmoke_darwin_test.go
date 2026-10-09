@@ -309,3 +309,159 @@ func TestDarwinTunSmoke(t *testing.T) {
 	step("forwarder active flows at end: %s", stats)
 	fmt.Println("TUN-SMOKE PASS")
 }
+
+// TestDarwinAppTunE2E 整个 App 的 TUN 开关（SimpleConnect，与界面/菜单同一入口）：
+// 节点是跑在本机物理网卡地址上的 Xray SOCKS 服务端（其 freedom 出站绑定物理网卡，不进 TUN）。
+// 开 TUN 后不设任何代理直接 curl https://example.com：系统 DNS 被劫持到 198.18.0.2、
+// 默认路由进 utun → gVisor → 主内核 SOCKS 入站 → 节点 → 互联网；关 TUN 后路由/DNS 全部还原。
+func TestDarwinAppTunE2E(t *testing.T) {
+	if os.Getenv("KNCLOUD_APP_TUN_E2E") != "1" {
+		t.Skip("set KNCLOUD_APP_TUN_E2E=1 (takes over the whole machine's traffic for a few seconds)")
+	}
+	if os.Geteuid() != 0 && exec.Command("/usr/bin/sudo", "-n", "/usr/bin/true").Run() != nil {
+		t.Skip("needs root or passwordless sudo")
+	}
+	t0 := time.Now()
+	step := func(format string, args ...any) {
+		t.Logf("[%6.2fs] "+format, append([]any{time.Since(t0).Seconds()}, args...)...)
+	}
+	cfgDir := t.TempDir()
+	t.Setenv("APPDATA", cfgDir)
+	dir, err := os.MkdirTemp("/tmp", "kn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	tunHelper.close()
+	tunHelper.sockOverride = filepath.Join(dir, "h.sock")
+	knUtun.closeDevice()
+
+	phys, ok := physHopFor(net.ParseIP("8.8.8.8"), 0)
+	if !ok {
+		t.Fatal("no physical default route")
+	}
+	ifc, err := net.InterfaceByIndex(int(phys.IfIndex))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var physIP string
+	addrs, _ := ifc.Addrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+			physIP = n.IP.String()
+			break
+		}
+	}
+	if physIP == "" {
+		t.Fatalf("no IPv4 on %s", ifc.Name)
+	}
+	srvPort := pickFreeLoopbackPort()
+	srv := map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"inbounds": []any{map[string]any{
+			"tag": "srv-in", "listen": physIP, "port": srvPort, "protocol": "socks",
+			"settings": map[string]any{"auth": "noauth", "udp": true, "ip": physIP},
+		}},
+		"outbounds": []any{map[string]any{
+			"tag": "srv-out", "protocol": "freedom",
+			"streamSettings": map[string]any{"sockopt": map[string]any{"interface": ifc.Name}},
+		}},
+	}
+	data, _ := json.Marshal(srv)
+	pb, err := serial.DecodeJSONConfig(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, err := pb.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvInst, err := xcore.New(cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srvInst.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srvInst.Close()
+	step("node = SOCKS server on %s:%d (egress bound to %s)", physIP, srvPort, ifc.Name)
+
+	a := &App{
+		routingMode: "bypass-cn",
+		settings: AppSettings{
+			SocksPort: pickFreeLoopbackPort(), HttpPort: pickFreeLoopbackPort(),
+			DnsServers: "1.1.1.1", MuxEnabled: false,
+		},
+		nodes: []NodeItem{{ID: "n1", Name: "lan-socks", Protocol: "SOCKS", Address: physIP, Port: srvPort, Network: "tcp", Active: true}},
+		activeNodeID: "n1",
+	}
+	a.mu.Lock()
+	if err := a.startCoreLocked(); err != nil {
+		a.mu.Unlock()
+		t.Fatalf("start core: %v", err)
+	}
+	a.coreRunning = true
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.tunSoftStopLocked()
+		a.stopCoreLocked()
+		a.coreRunning = false
+		a.mu.Unlock()
+		tunHelper.do(helperReq{Op: "cleanup"})
+		tunHelper.call(helperReq{Op: "quit"})
+		tunHelper.close()
+		knUtun.closeDevice()
+		for _, l := range a.GetLogs() {
+			t.Logf("app log: [%s] %s", l.Level, l.Message)
+		}
+	}()
+
+	svcs, _ := networkServices()
+	before := map[string][]string{}
+	for _, s := range svcs {
+		before[s] = getServiceDNS(s)
+	}
+
+	on, err := a.SimpleConnect(true)
+	if err != nil || !on {
+		t.Fatalf("SimpleConnect(true): on=%v err=%v", on, err)
+	}
+	step("TUN on via SimpleConnect (%d routes, utun index %d)", a.tunRt.count(""), a.tunIfaceIdx)
+	out, _ := exec.Command("/sbin/route", "-n", "get", "1.0.0.1").CombinedOutput()
+	if !strings.Contains(string(out), "interface: utun") {
+		t.Fatalf("default traffic is not routed into utun:\n%s", out)
+	}
+	if len(svcs) > 0 {
+		if d := getServiceDNS(svcs[0]); len(d) == 0 || d[0] != tunDnsAddr {
+			t.Fatalf("system DNS not hijacked: %v", d)
+		}
+	}
+	var code string
+	for i := 0; i < 3 && code != "200"; i++ {
+		o, err := exec.Command("/usr/bin/curl", "-sS", "--noproxy", "*", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "20", "https://example.com/").CombinedOutput()
+		code = strings.TrimSpace(string(o))
+		if err != nil {
+			t.Logf("curl attempt %d: %v %s", i+1, err, o)
+		}
+	}
+	if code != "200" {
+		t.Fatalf("curl https://example.com through app TUN: %q", code)
+	}
+	step("curl https://example.com through TUN -> HTTP %s (tcp flows seen: %d)", code, a.tap.tcpActive.Load())
+
+	if on, err := a.SimpleConnect(false); err != nil || on {
+		t.Fatalf("SimpleConnect(false): on=%v err=%v", on, err)
+	}
+	out, _ = exec.Command("/sbin/route", "-n", "get", "1.0.0.1").CombinedOutput()
+	if strings.Contains(string(out), "interface: utun") {
+		t.Fatalf("utun still carries default traffic after TUN off:\n%s", out)
+	}
+	for _, s := range svcs {
+		if a, b := strings.Join(getServiceDNS(s), ","), strings.Join(before[s], ","); a != b {
+			t.Fatalf("DNS of %q not restored: %s != %s", s, a, b)
+		}
+	}
+	step("TUN off: routes and DNS restored")
+	fmt.Println("APP-TUN-E2E PASS")
+}
