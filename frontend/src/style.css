@@ -1606,10 +1606,10 @@ select.win11-input option {
   padding: 2px 8px; border-radius: 6px; background: var(--accent-subtle); white-space: nowrap;
 }
 .acct-value {
-  font-size: 18px; font-weight: 700; color: var(--text-primary);
+  font-size: 22px; font-weight: 800; color: var(--text-primary);
   font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.acct-value .acct-sub { font-size: 12px; font-weight: 400; }
+.acct-value .acct-sub { font-size: 14px; font-weight: 600; color: var(--text-secondary); }
 .acct-bar { margin-top: 8px; }
 .acct-sub { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
 .acct-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
@@ -1812,7 +1812,7 @@ select.win11-input option {
 .platform-mac .acct-split { gap: 12px; }
 .platform-mac .acct-left { padding: 10px 14px 12px; gap: 8px; }
 .platform-mac .acct-email { font-size: 14px; }
-.platform-mac .acct-value { font-size: 16px; }
+.platform-mac .acct-value { font-size: 20px; }
 .platform-mac .acct-bar { margin-top: 6px; }
 .platform-mac .acct-action { height: 28px; padding: 0 8px; }
 .platform-mac .acct-speed { margin: 4px 0 2px; font-size: 19px; }
@@ -1854,9 +1854,9 @@ select.win11-input option {
 }
 .acct-meta-item + .acct-meta-item { border-left: 1px solid var(--border-subtle); }
 .acct-meta-item > span { max-width: 100%; }
-.acct-meta-label { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-meta-label { font-size: 12px; font-weight: 600; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acct-meta-val {
-  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  font-size: 16px; font-weight: 700; color: var(--text-primary);
   font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .platform-mac .acct-meta { margin-top: 10px; }
