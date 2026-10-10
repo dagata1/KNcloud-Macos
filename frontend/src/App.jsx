@@ -967,7 +967,10 @@ export default function App() {
   const openEditNode = (node, e) => {
     e.stopPropagation();
     setEditingNodeId(node.id);
+    // 带上节点的全部字段（flow / sni / pbk / sid / path 等表单里没有的扩展参数），
+    // 否则保存时这些字段被清空，节点就失效了
     setNewNode({
+      ...node,
       name: node.name || '',
       protocol: node.protocol || 'VLESS',
       address: node.address || '',
