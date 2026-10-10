@@ -95,15 +95,17 @@ type LogItem struct {
 }
 
 type AppSettings struct {
-	Theme      string `json:"theme"`  // system, light, dark
-	UiMode     string `json:"uiMode"` // classic(普通模式), simple(简易模式)
-	SocksPort  int    `json:"socksPort"`
-	HttpPort   int    `json:"httpPort"`
-	AutoStart  bool   `json:"autoStart"`
-	AllowLan   bool   `json:"allowLan"`
-	MuxEnabled bool   `json:"muxEnabled"`
-	CoreType   string `json:"coreType"`
-	DnsServers string `json:"dnsServers"`
+	Theme string `json:"theme"` // system, light, dark
+	// ThemeChosen 用户是否亲手切换过主题；macOS 上没切换过的老配置按系统外观（system）。
+	ThemeChosen bool   `json:"themeChosen"`
+	UiMode      string `json:"uiMode"` // classic(普通模式), simple(简易模式)
+	SocksPort   int    `json:"socksPort"`
+	HttpPort    int    `json:"httpPort"`
+	AutoStart   bool   `json:"autoStart"`
+	AllowLan    bool   `json:"allowLan"`
+	MuxEnabled  bool   `json:"muxEnabled"`
+	CoreType    string `json:"coreType"`
+	DnsServers  string `json:"dnsServers"`
 	// MinimizeToTray 为 true 时，点窗口关闭按钮只收进托盘，程序继续后台运行；
 	// 真正退出需要走托盘菜单的「退出」。
 	MinimizeToTray bool `json:"minimizeToTray"`
@@ -174,7 +176,7 @@ func NewApp() *App {
 		routingMode:  "bypass-cn",
 		activeNodeID: "",
 		settings: AppSettings{
-			Theme:      "dark",
+			Theme:      defaultTheme,
 			UiMode:     "classic",
 			SocksPort:  10808,
 			HttpPort:   10809,

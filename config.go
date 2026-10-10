@@ -68,6 +68,10 @@ func (a *App) loadPersisted() bool {
 		a.subscriptions = []SubscriptionItem{}
 	}
 	a.settings = cfg.Settings
+	// 用户没亲手选过主题：按平台默认（macOS 跟随系统外观，Windows 保持原样）
+	if defaultTheme == "system" && !a.settings.ThemeChosen {
+		a.settings.Theme = "system"
+	}
 	// 旧版本配置文件里没有 minimizeToTray 字段：默认开启「关闭窗口最小化到托盘」
 	if !settingsHasKey(data, "minimizeToTray") {
 		a.settings.MinimizeToTray = true

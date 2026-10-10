@@ -14,6 +14,7 @@ import {
   Menu,
   Sun,
   Moon,
+  Monitor,
   Minus,
   Square,
   X,
@@ -108,7 +109,25 @@ export default function App() {
     ? (d < 300 ? '#3fbf6f' : d < 800 ? '#e5a50a' : '#ff6b6b')
     : d === -2 ? '#ff6b6b' : 'var(--text-tertiary)';
 
-  const [theme, setTheme] = useState('dark');
+  // themePref：system（跟随系统外观）/ light / dark；theme 为实际生效的主题
+  const [themePref, setThemePref] = useState('system');
+  const [systemDark, setSystemDark] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+      : true);
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e) => setSystemDark(e.matches);
+    setSystemDark(mq.matches);
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', onChange);
+      else if (mq.removeListener) mq.removeListener(onChange);
+    };
+  }, []);
+  const theme = themePref === 'system' ? (systemDark ? 'dark' : 'light') : themePref;
   const brandLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
   const loginLogo = theme === 'dark' ? kncLoginDark : kncLoginLight;
   const [uiMode, setUiMode] = useState('simple'); // classic=普通模式, simple=简易模式（登录后默认简洁）
@@ -314,8 +333,7 @@ export default function App() {
       if (curAccount) setAccount(curAccount);
       if (curSettings) {
         setLocalSettings(curSettings);
-        if (curSettings.theme === 'light') setTheme('light');
-        else if (curSettings.theme === 'dark') setTheme('dark');
+        if (curSettings.theme === 'light' || curSettings.theme === 'dark' || curSettings.theme === 'system') setThemePref(curSettings.theme);
         // 按持久化的模式 + 登录态统一决定窗口尺寸：
         //   未登录 → 登录页紧凑尺寸；已登录 → 简洁模式紧凑尺寸 / 普通模式默认尺寸
         // （此前只在 uiMode==='simple' 时调整，classic 持久化的简单模式下窗口不会缩小）
@@ -361,12 +379,14 @@ export default function App() {
     }
   };
 
+  const themeTitle = themePref === 'system' ? '主题：跟随系统（点击切换到浅色）' : themePref === 'light' ? '主题：浅色（点击切换到深色）' : '主题：深色（点击切换到跟随系统）';
   const handleThemeToggle = async () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
+    // 跟随系统 → 浅色 → 深色 → 跟随系统
+    const next = themePref === 'system' ? 'light' : themePref === 'light' ? 'dark' : 'system';
+    setThemePref(next);
     try {
-      await SaveSettings({ ...settings, theme: next });
-      setLocalSettings(prev => ({ ...prev, theme: next }));
+      await SaveSettings({ ...settings, theme: next, themeChosen: true });
+      setLocalSettings(prev => ({ ...prev, theme: next, themeChosen: true }));
     } catch (e) {
       // 主题切换失败不影响使用
     }
@@ -1206,8 +1226,8 @@ export default function App() {
             <button className="theme-toggle-btn" onClick={handleUiModeToggle} title="切换到普通模式（完整设置）">
               <SlidersHorizontal size={15} />
             </button>
-            <button className="theme-toggle-btn" onClick={handleThemeToggle} title="切换浅色 / 深色主题">
-              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            <button className="theme-toggle-btn" onClick={handleThemeToggle} title={themeTitle}>
+              {themePref === 'system' ? <Monitor size={15} /> : themePref === 'light' ? <Sun size={15} /> : <Moon size={15} />}
             </button>
             <button className="win-caption-btn" onClick={() => WindowMin()} title="最小化">
               <Minus size={13} />
@@ -1379,9 +1399,9 @@ export default function App() {
           <button
             className="theme-toggle-btn"
             onClick={handleThemeToggle}
-            title="切换浅色 / 深色主题"
+            title={themeTitle}
           >
-            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            {themePref === 'system' ? <Monitor size={15} /> : themePref === 'light' ? <Sun size={15} /> : <Moon size={15} />}
           </button>
           <button className="win-caption-btn" onClick={() => WindowMin()} title="最小化">
             <Minus size={13} />

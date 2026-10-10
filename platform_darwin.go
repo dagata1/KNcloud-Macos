@@ -16,6 +16,9 @@ import (
 // 长连接，不切断的话刷新页面不生效，必须重启浏览器。
 const cutConnsOnRoutingSwitch = true
 
+// defaultTheme 界面主题默认值：macOS 跟随系统浅色/深色外观。
+const defaultTheme = "system"
+
 // updateRepo macOS 版在线更新查询的 GitHub 仓库。
 const updateRepo = "dagata1/KNcloud-Macos"
 
