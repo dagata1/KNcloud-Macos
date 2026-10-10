@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"v2rayN-win11/internal/portpick"
+
 	"github.com/xtls/xray-core/common"
 	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/outbound"
@@ -74,7 +76,26 @@ type ruleObj struct {
 
 // buildCoreConfigJSON 根据当前节点 / 设置 / 路由模式生成 Xray 配置
 func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
+	return a.coreConfigJSON(&node)
+}
+
+// buildDirectCoreConfigJSON 「只有直连出站」的内核配置：没选节点或节点配置起不来时内核照常运行，
+// 本地 SOCKS / HTTP 入站照样监听，流量全部直连。
+func (a *App) buildDirectCoreConfigJSON() (string, error) {
+	return a.coreConfigJSON(nil)
+}
+
+// coreConfigJSON node 为 nil 时生成直连配置（无 proxy 出站，规则全部指向 direct）。
+func (a *App) coreConfigJSON(nodePtr *NodeItem) (string, error) {
+	var node NodeItem
+	if nodePtr != nil {
+		node = *nodePtr
+	}
 	switch node.Protocol {
+	case "":
+		if nodePtr != nil {
+			return "", fmt.Errorf("node has no protocol")
+		}
 	case "VLESS", "VMess", "Trojan", "Shadowsocks", "HTTP", "SOCKS":
 	case "AnyTLS":
 		// Xray 没有 AnyTLS 出站，走进程内 AnyTLS 协议桥（见 anytls.go）：
@@ -130,9 +151,13 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		})
 	}
 
-	proxyOut, err := a.buildProxyOutboundLocked(node, a.bridgeAddr)
-	if err != nil {
-		return "", err
+	var proxyOut map[string]interface{}
+	if nodePtr != nil {
+		var err error
+		proxyOut, err = a.buildProxyOutboundLocked(node, a.bridgeAddr)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	directOut := map[string]interface{}{"tag": "direct", "protocol": "freedom", "settings": map[string]interface{}{}}
@@ -141,9 +166,12 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 		directOut["streamSettings"] = map[string]interface{}{"sockopt": map[string]interface{}{"interface": a.tunEgressIface}}
 	}
 	outbounds := []map[string]interface{}{
-		proxyOut,
 		directOut,
 		{"tag": "block", "protocol": "blackhole", "settings": map[string]interface{}{}},
+	}
+	if proxyOut != nil {
+		// proxy 放第一个：Xray 以第一个出站为默认出站
+		outbounds = append([]map[string]interface{}{proxyOut}, outbounds...)
 	}
 
 	var rules []ruleObj
@@ -158,6 +186,10 @@ func (a *App) buildCoreConfigJSON(node NodeItem) (string, error) {
 	// TUN 模式 = 全局接管：不论用户保存的策略是什么，TUN 下一律按 global（私网直连、其余走代理）。
 	if a.tunEgressIface != "" {
 		effectiveMode = tunPolicy
+	}
+	// 没有节点（直连配置）：不管策略是什么，全部直连
+	if nodePtr == nil {
+		effectiveMode = "direct"
 	}
 	switch effectiveMode {
 	case "global":
@@ -400,47 +432,139 @@ func (a *App) buildProxyOutboundLocked(node NodeItem, bridgeAddr string) (map[st
 	return out, nil
 }
 
-// startCoreLocked 启动 Xray 内核（调用方需持有写锁）
+// startCoreLocked 启动 Xray 内核（调用方需持有写锁）。
+//
+// 内核常开：没有选中节点（首次登录前、节点全删光）时以「只有直连出站」的配置启动，
+// 本地 SOCKS / HTTP 入站照样监听；选了节点后由换节点 / 重启流程切成正常配置。
+// 配置的端口被别的程序占用时自动换到空闲端口（见 ensureCorePortsLocked）。
+// 成功时清除直连兜底标记（coreFallback）。
 func (a *App) startCoreLocked() error {
 	a.stopCoreLocked()
-
 	var node *NodeItem
-	for i := range a.nodes {
-		if a.nodes[i].Active {
-			node = &a.nodes[i]
-			break
-		}
+	if n := a.activeNodeLocked(); n != nil {
+		cp := *n
+		node = &cp
 	}
-	if node == nil {
-		return fmt.Errorf("no node selected, cannot start core")
+	if err := a.startXrayLocked(node); err != nil {
+		return err
 	}
+	a.coreFallback = false
+	return nil
+}
 
+// startDirectCoreLocked 以「只有直连出站」的配置启动内核（调用方需持有写锁）。
+// 节点配置起不来时的降级：入站照常监听，流量全部直连，等重试 / 换节点恢复正常配置。
+func (a *App) startDirectCoreLocked() error {
+	a.stopCoreLocked()
+	return a.startXrayLocked(nil)
+}
+
+// startXrayLocked 按 node（nil = 只有直连出站）启动 Xray（调用方需持有写锁，内核已停）。
+// 监听时才发现端口被占用（预检与真正监听之间被抢占，或被系统保留）时，换端口再试，最多 3 次。
+func (a *App) startXrayLocked(node *NodeItem) error {
 	assetDir, err := ensureGeoAssets()
 	if err != nil {
-		return fmt.Errorf("failed to unpack routing data: %w", err)
-	}
-	os.Setenv("xray.location.asset", assetDir)
-
-	// 端口占用预检，给出比内核原始报错更明确的提示
-	preListen := "127.0.0.1"
-	if a.settings.AllowLan {
-		preListen = "0.0.0.0"
-	}
-	for _, p := range []struct {
-		name string
-		port int
-	}{{"SOCKS5", a.settings.SocksPort}, {"HTTP", a.settings.HttpPort}} {
-		addr := fmt.Sprintf("%s:%d", preListen, p.port)
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			return &portInUseError{name: p.name, port: p.port}
+		if node != nil {
+			return fmt.Errorf("failed to unpack routing data: %w", err)
 		}
-		ln.Close()
+		// 直连配置不引用 geoip/geosite，解包失败也照样启动
+	} else {
+		os.Setenv("xray.location.asset", assetDir)
 	}
 
+	forceSocks, forceHTTP := false, false
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		oldSocks := a.settings.SocksPort
+		if err := a.ensureCorePortsLocked(forceSocks, forceHTTP); err != nil {
+			return err
+		}
+		err := a.launchXrayLocked(node)
+		if err == nil {
+			if a.settings.SocksPort != oldSocks {
+				a.socksPortMovedLocked()
+			}
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, errPortInUse) {
+			return err
+		}
+		// 从报错里认出是哪个端口；认不出就两个都换
+		msg := err.Error()
+		forceSocks = strings.Contains(msg, fmt.Sprintf(":%d", a.settings.SocksPort))
+		forceHTTP = strings.Contains(msg, fmt.Sprintf(":%d", a.settings.HttpPort))
+		if !forceSocks && !forceHTTP {
+			forceSocks, forceHTTP = true, true
+		}
+		a.addLogInternal("warn", fmt.Sprintf("Core listen failed (%v), picking another port", err))
+	}
+	return lastErr
+}
+
+// ensureCorePortsLocked 端口预检：SOCKS / HTTP 端口被别的程序占用（或与 TUN 的 UDP 入站端口
+// 冲突）时，自动换到空闲端口（从原端口往上找，找不到让系统分配），写回设置并落盘；
+// 系统代理开着时改指向新端口。force* 表示即使探测显示空闲也要换（真正监听时失败过）。
+func (a *App) ensureCorePortsLocked(forceSocks, forceHTTP bool) error {
+	host := "127.0.0.1"
+	if a.settings.AllowLan {
+		host = "0.0.0.0"
+	}
+	oldSocks, oldHTTP := a.settings.SocksPort, a.settings.HttpPort
+	r := portpick.ResolvePair(oldSocks, oldHTTP, []int{a.tunUDPPort}, forceSocks, forceHTTP,
+		portpick.ListenBusy(host), portpick.SystemAssign(host))
+	if !r.OK() {
+		if r.Socks == 0 {
+			return &portInUseError{name: "SOCKS5", port: oldSocks}
+		}
+		return &portInUseError{name: "HTTP", port: oldHTTP}
+	}
+	if !r.Changed() {
+		return nil
+	}
+	a.settings.SocksPort, a.settings.HttpPort = r.Socks, r.HTTP
+	if r.SocksMoved {
+		a.addLogInternal("warn", fmt.Sprintf("SOCKS5 port %d is in use by another program, switched to %d (saved to Preferences)", oldSocks, r.Socks))
+	}
+	if r.HTTPMoved {
+		a.addLogInternal("warn", fmt.Sprintf("HTTP port %d is in use by another program, switched to %d (saved to Preferences)", oldHTTP, r.HTTP))
+	}
+	a.savePersisted()
+	if r.HTTPMoved && a.systemProxy && !a.tunRunning {
+		server := fmt.Sprintf("127.0.0.1:%d", r.HTTP)
+		if err := setSystemProxy(true, server); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("Failed to point system proxy to the new HTTP port: %v", err))
+		} else {
+			a.addLogInternal("info", fmt.Sprintf("System proxy now points to %s", server))
+		}
+	}
+	// 界面（设置页、仪表盘端口）随后刷新；调用方持有 a.mu，事件在锁外的协程里发
+	go a.emitRefresh()
+	return nil
+}
+
+// socksPortMovedLocked SOCKS 端口被自动换掉后，正在运行的 TUN 转发要改连新端口（调用方持有写锁）。
+func (a *App) socksPortMovedLocked() {
+	if !a.tunRunning {
+		return
+	}
+	if a.nativeTunRunning() {
+		a.addLogInternal("warn", "SOCKS port changed while the native TUN engine is running; turn TUN off and on again to reconnect it")
+		return
+	}
+	if a.tap != nil {
+		a.stopTapForwarding()
+		if err := a.startTapForwarding(); err != nil {
+			a.addLogInternal("error", fmt.Sprintf("TUN: failed to reconnect forwarding to the new SOCKS port: %v", err))
+		}
+	}
+}
+
+// launchXrayLocked 生成配置并启动 Xray 实例（端口已预检）。
+func (a *App) launchXrayLocked(node *NodeItem) error {
 	// Xray 不支持 AnyTLS：这类节点先起 AnyTLS 协议桥，
 	// 再把它的本地 SOCKS 端口当作 Xray 的 proxy 出站
-	if needsAnyTLSBridge(node.Protocol) {
+	if node != nil && needsAnyTLSBridge(node.Protocol) {
 		bridge, err := startAnyTLSBridge(*node)
 		if err != nil {
 			return fmt.Errorf("failed to start AnyTLS bridge: %w", err)
@@ -449,7 +573,13 @@ func (a *App) startCoreLocked() error {
 		a.bridgeAddr = bridge.addr
 	}
 
-	coreCfg, err := a.buildCoreConfigLocked(*node)
+	var coreCfg *xcore.Config
+	var err error
+	if node != nil {
+		coreCfg, err = a.buildCoreConfigLocked(*node)
+	} else {
+		coreCfg, err = a.buildDirectCoreConfigLocked()
+	}
 	if err != nil {
 		a.stopBridgeLocked()
 		return err
@@ -475,10 +605,17 @@ func (a *App) startCoreLocked() error {
 	}
 	a.xrayInst = inst
 	a.statsInst.set(inst)
-	a.coreNodeID = node.ID
 	a.coreErr, a.corePortErr = "", false
-	a.addLogInternal("info", fmt.Sprintf("Xray-core %s started | SOCKS5 127.0.0.1:%d / HTTP 127.0.0.1:%d | node: %s",
-		xrayCoreVersion(), a.settings.SocksPort, a.settings.HttpPort, node.Name))
+	a.liveHTTPPort.Store(int32(a.settings.HttpPort))
+	if node != nil {
+		a.coreNodeID = node.ID
+		a.addLogInternal("info", fmt.Sprintf("Xray-core %s started | SOCKS5 127.0.0.1:%d / HTTP 127.0.0.1:%d | node: %s",
+			xrayCoreVersion(), a.settings.SocksPort, a.settings.HttpPort, node.Name))
+	} else {
+		a.coreNodeID = ""
+		a.addLogInternal("info", fmt.Sprintf("Xray-core %s started (direct only, no proxy node) | SOCKS5 127.0.0.1:%d / HTTP 127.0.0.1:%d",
+			xrayCoreVersion(), a.settings.SocksPort, a.settings.HttpPort))
+	}
 	return nil
 }
 
@@ -488,6 +625,19 @@ func (a *App) buildCoreConfigLocked(node NodeItem) (*xcore.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeCoreConfig(cfgJSON)
+}
+
+// buildDirectCoreConfigLocked 构建「只有直连出站」的内核配置（调用方需持有锁）。
+func (a *App) buildDirectCoreConfigLocked() (*xcore.Config, error) {
+	cfgJSON, err := a.buildDirectCoreConfigJSON()
+	if err != nil {
+		return nil, err
+	}
+	return decodeCoreConfig(cfgJSON)
+}
+
+func decodeCoreConfig(cfgJSON string) (*xcore.Config, error) {
 	pbCfg, err := serial.DecodeJSONConfig(bytes.NewReader([]byte(cfgJSON)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse core config: %w", err)
@@ -511,6 +661,7 @@ func (a *App) stopCoreLocked() {
 	}
 	a.statsInst.set(nil)
 	a.coreNodeID = ""
+	a.liveHTTPPort.Store(0)
 	a.stopBridgeLocked()
 }
 
@@ -767,6 +918,11 @@ func (a *App) commitProxyOutboundLocked(p *preparedOutbound) error {
 	//    因此先取出引用，等新 handler 就位后再由我们关闭。
 	//    （proxy 若是默认出站，摘除会把 defaultHandler 置空，AddHandler 时自动补上。）
 	old := mgr.GetHandler(proxyOutboundTag)
+	if old == nil {
+		// 直连配置（没有 proxy 出站）：没法热替换，交给调用方整体重启成正常配置
+		p.discard()
+		return errHotSwapUnavailable
+	}
 	if err := mgr.RemoveHandler(context.Background(), proxyOutboundTag); err != nil {
 		p.discard()
 		return fmt.Errorf("failed to detach current outbound: %w", err)

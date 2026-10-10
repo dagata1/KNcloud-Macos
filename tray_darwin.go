@@ -171,12 +171,6 @@ func buildAppMenu(a *App) *menu.Menu {
 			nm.AddText(fmt.Sprintf("更多节点…（共 %d 个）", len(nodes)), nil, func(*menu.CallbackData) { a.showApp() })
 		}
 	}
-	pm.AddSeparator()
-	coreLabel := "重启内核"
-	if !coreRunning {
-		coreLabel = "重启内核（内核未运行）"
-	}
-	pm.AddText(coreLabel, keys.CmdOrCtrl("r"), func(*menu.CallbackData) { go a.trayRestartCore() })
 
 	root.Append(menu.WindowMenu())
 	return root

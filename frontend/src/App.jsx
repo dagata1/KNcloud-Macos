@@ -56,7 +56,6 @@ import {
   StartAutoPing,
   IsAutoPinging,
   GetCoreStatus,
-  RestartCore,
   GetAppVersion,
   CheckForUpdate,
   StartUpdate,
@@ -301,11 +300,11 @@ export default function App() {
     }
   };
 
-  // 内核状态（仪表盘状态条与「重启内核」按钮）
+  // 内核状态（仪表盘状态条）
   const coreState = status.coreState || (status.running ? 'running' : 'stopped');
-  const coreBad = coreState !== 'running';
   const coreStateLabel = {
-    running: '内核运行中',
+    running: status.coreDirectOnly ? '内核运行中 · 直连（未选节点）' : '内核运行中',
+    fallback: '内核运行中 · 节点不可用，临时直连',
     stopped: '内核已停止',
     retrying: '内核启动失败 · 自动重试中…',
     failed: '内核启动失败' + (status.corePortError ? '：端口被占用' : ''),
@@ -363,22 +362,6 @@ export default function App() {
   };
 
   // Actions
-  // 「重启内核」：停止并重新启动内核，后端按当前模式重新应用系统代理（TUN 下保持暂停）
-  const [restartingCore, setRestartingCore] = useState(false);
-  const handleRestartCore = async () => {
-    if (restartingCore) return;
-    setRestartingCore(true);
-    try {
-      await RestartCore();
-      showToast('内核已重新启动', 'success');
-    } catch (e) {
-      showToast('重启内核失败：' + (e?.message || e), 'error');
-    } finally {
-      try { setStatus(await GetCoreStatus()); } catch (_) {}
-      setRestartingCore(false);
-    }
-  };
-
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
   useEffect(() => {
@@ -1420,7 +1403,7 @@ export default function App() {
     </div>
   );
 
-  // 代理模式四选一：Windows 版独占一行卡片；Mac 版放进节点卡片标题行，按文字宽度收窄
+  // 代理模式四选一：登录后放在订阅卡右侧（实时速率下方），未登录时占满整行
   const modeSwitchEl = (
                   <div
                     className={`segmented-control mode-switch mode-switch-full ${pendingMode ? 'busy' : ''}`}
@@ -1433,10 +1416,10 @@ export default function App() {
                       style={{ transform: `translateX(calc(${modeIndex} * (100% + 4px)))` }}
                     />
                     {[
-                      { id: 'bypass-cn', label: '绕过大陆', short: '绕过' },
-                      { id: 'global', label: '全局代理', short: '全局' },
-                      { id: 'direct', label: '全局直连', short: '直连' },
-                      { id: 'tun', label: 'TUN 模式', short: 'TUN', title: isMac ? '虚拟网卡（utun）全局接管整机流量（首次开启需输入管理员密码授权）' : '虚拟网卡全局接管整机流量（需管理员权限）' },
+                      { id: 'bypass-cn', label: '绕过大陆' },
+                      { id: 'global', label: '全局代理' },
+                      { id: 'direct', label: '全局直连' },
+                      { id: 'tun', label: 'TUN 模式', title: isMac ? '虚拟网卡（utun）全局接管整机流量（首次开启需输入管理员密码授权）' : '虚拟网卡全局接管整机流量（需管理员权限）' },
                     ].map(m => (
                       <button
                         key={m.id}
@@ -1445,9 +1428,9 @@ export default function App() {
                         aria-checked={shownMode === m.id}
                         className={`segment-btn ${shownMode === m.id ? 'active' : ''}`}
                         onClick={() => handleModeSelect(m.id)}
-                        title={m.title || (isMac ? m.label : undefined)}
+                        title={m.title}
                       >
-                        {isMac ? m.short : m.label}
+                        {m.label}
                       </button>
                     ))}
                   </div>
@@ -1549,43 +1532,25 @@ export default function App() {
                   <h1 className="content-title">运行状态概览</h1>
                 </div>
                 <div className="content-header-right">
-                {isMac && modeSwitchEl}
                 <div className={`core-status core-${coreState}`}>
                   <span className="core-dot" aria-hidden="true" />
                   <span className="core-label" title={status.coreError || ''}>{coreStateLabel}</span>
-                  {/* 「重启内核」平时隐藏，仅内核启动失败 / 重试中时出现，用于一键恢复 */}
-                  {coreBad && (
-                  <button
-                    type="button"
-                    className={`win11-btn core-restart-btn ${coreBad ? 'primary' : ''}`}
-                    onClick={handleRestartCore}
-                    disabled={restartingCore}
-                    title="停止并重新启动 Xray 内核，按当前模式重新应用系统代理"
-                  >
-                    <RefreshCw size={13} className={restartingCore ? 'spin' : ''} />
-                    {restartingCore ? '重启中…' : '重启内核'}
-                  </button>
-                  )}
                 </div>
                 </div>
               </div>
 
-              {(coreState === 'failed' || coreState === 'retrying') && (
+              {(coreState === 'failed' || coreState === 'retrying' || coreState === 'fallback') && (
                 <div className="win11-card core-error-card" role="alert">
                   <div className="core-error-title">
-                    {coreState === 'retrying' ? '内核启动失败，正在自动重试…' : '内核启动失败'}
+                    {coreState === 'fallback'
+                      ? '当前节点无法启动内核，内核已临时以直连运行'
+                      : '内核启动失败，正在自动重试…'}
                   </div>
                   {status.coreError && <div className="core-error-reason">{status.coreError}</div>}
                   <div className="core-error-hint">
-                    {status.corePortError ? (
-                      <>
-                        端口被其它程序占用。请在
-                        <button type="button" className="core-link" onClick={() => setActiveTab('settings')}>首选项设置</button>
-                        中更换 SOCKS / HTTP 端口，保存后内核会自动重新启动。
-                      </>
-                    ) : coreState === 'retrying'
-                      ? '程序会按 2 秒 / 5 秒 / 15 秒的间隔自动重试，也可以立即点击「重启内核」。'
-                      : '自动重试已结束。排查原因后点击「重启内核」再试一次。系统代理已暂时关闭，避免断网。'}
+                    {coreState === 'fallback'
+                      ? '本地端口照常可用，流量暂时全部直连。程序会自动重试当前节点，也可以换个节点。'
+                      : '程序会持续自动重试。期间系统代理已暂时关闭，避免断网。'}
                   </div>
                 </div>
               )}
@@ -1641,6 +1606,20 @@ export default function App() {
                             : '0%'
                         }} />
                       </div>
+                      <div className="acct-meta">
+                        <div className="acct-meta-item">
+                          <span className="acct-meta-label">剩余流量</span>
+                          <span className="acct-meta-val">{account.transferEnable > 0 ? fmtGB(Math.max(0, account.transferEnable - account.usedUp - account.usedDown)) : '无限'}</span>
+                        </div>
+                        <div className="acct-meta-item">
+                          <span className="acct-meta-label">可用节点</span>
+                          <span className="acct-meta-val">{nodes.length} 个</span>
+                        </div>
+                        <div className="acct-meta-item">
+                          <span className="acct-meta-label">上次同步</span>
+                          <span className="acct-meta-val" title={subscriptions[0]?.updatedAt || ''}>{(subscriptions[0]?.updatedAt || '—').replace(/^\d{4}-/, '')}</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                   <div className="win11-card acct-stat" title="仅统计经代理节点的流量">
@@ -1653,12 +1632,15 @@ export default function App() {
                     <div className="acct-speed">{status.downSpeed}</div>
                     <div className="acct-sub">本地累计下行: {status.totalDown}</div>
                   </div>
+                  <div className="win11-card mode-card acct-mode">
+                    {modeSwitchEl}
+                  </div>
                 </div>
               )}
 
 
-              {/* 代理模式：四个互斥按钮占满整行（状态由高亮按钮本身表达，不再单独展示） */}
-              {!isMac && (
+              {/* 未登录时没有订阅卡，模式切换单独占满整行 */}
+              {!(account && account.loggedIn) && (
               <div className="win11-card mode-card">
                 {modeSwitchEl}
               </div>

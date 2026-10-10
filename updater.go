@@ -2,14 +2,11 @@ package main
 
 import (
 	"archive/zip"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"v2rayN-win11/internal/subfetch"
+	"v2rayN-win11/internal/updfetch"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -26,7 +26,7 @@ import (
 // 纯手动：不自动检查、不弹窗、不后台安装。用户在「首选项设置」点「检查更新」，
 // 有新版本时显示版本号与更新说明，用户再点「立即更新」才会下载安装：
 //
-//	下载 KNcloud-WIN-<tag>.zip 与 KNcloud-WIN-<tag>.zip.sha256 → 校验 SHA256
+//	经本地 HTTP 代理（与订阅相同，不直连兜底）下载 KNcloud-WIN-<tag>.zip 与 KNcloud-WIN-<tag>.zip.sha256 → 校验 SHA256
 //	→ 解压到 <程序目录>\update\<tag>（防 zip-slip）→ 停内核 / TUN、还原系统代理
 //	→ 运行中的 exe 改名为 .old 后写入新 exe，bin\ 下的文件同样处理（configs\、logs\ 不碰）
 //	→ 启动新 exe（--wait-pid 等旧进程退出，避开单实例锁）→ 旧进程退出；
@@ -180,75 +180,45 @@ func isDevVersion(v string) bool {
 
 // ------------------------- HTTP -------------------------
 
-// updateClients 按顺序返回要尝试的 HTTP 客户端：内核在跑且不是「全局直连」时先走本程序自己的
-// HTTP 代理（国内直连 GitHub 常常很慢），失败再直连；否则只直连。
-func (a *App) updateClients(timeout time.Duration) []*http.Client {
-	direct := &http.Client{Timeout: timeout, Transport: &http.Transport{
-		Proxy:                 nil,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-	}}
-	var out []*http.Client
-	if a.mu.TryRLock() {
-		running := a.coreRunning
-		port := a.settings.HttpPort
-		mode := a.routingMode
-		a.mu.RUnlock()
-		if running && port > 0 && mode != "direct" {
-			pu, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
-			out = append(out, &http.Client{Timeout: timeout, Transport: &http.Transport{
-				Proxy:                 http.ProxyURL(pu),
-				TLSHandshakeTimeout:   15 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-			}})
-		}
+// updateProxyOptions 应用内更新的网络请求一律经本程序的本地 HTTP 代理（与订阅相同：不看路由
+// 模式、不直连兜底；分流 / 直连由内核按当前模式决定）。内核正在重启 / 重试时最多等 subProxyWait，
+// 端口每个请求重新取（内核自动换了端口也能跟上）。
+func (a *App) updateProxyOptions(timeout time.Duration) subfetch.Options {
+	return subfetch.Options{
+		Port:    func() int { return int(a.liveHTTPPort.Load()) },
+		Wait:    subProxyWait,
+		Timeout: timeout,
 	}
-	return append(out, direct)
 }
 
-func updateRequest(ctx context.Context, rawURL string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "KNcloud-WIN/"+appVersion)
-	return req, nil
-}
+func updateUserAgent() string { return "KNcloud-WIN/" + appVersion }
 
-// fetchLatestRelease 拉取最新正式发布信息。
+// fetchLatestRelease 经本地代理拉取最新正式发布信息。
 func (a *App) fetchLatestRelease() (*ghRelease, error) {
-	var lastErr error
-	for _, c := range a.updateClients(20 * time.Second) {
-		req, err := updateRequest(context.Background(), updateLatestAPI)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Accept", "application/vnd.github+json")
-		resp, err := c.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
-			if resp.StatusCode == http.StatusNotFound {
+	data, err := updfetch.Get(updfetch.Request{
+		URL:       updateLatestAPI,
+		UserAgent: updateUserAgent(),
+		Accept:    "application/vnd.github+json",
+		MaxBytes:  2 << 20,
+	}, a.updateProxyOptions(20*time.Second))
+	if err != nil {
+		var se *updfetch.HTTPStatusError
+		if errors.As(err, &se) {
+			if se.Code == http.StatusNotFound {
 				return nil, fmt.Errorf("GitHub 返回 404：发布仓库不可公开访问或尚无正式发布")
 			}
-			continue
+			return nil, fmt.Errorf("GitHub 返回 HTTP %d", se.Code)
 		}
-		var rel ghRelease
-		if err := json.Unmarshal(data, &rel); err != nil {
-			return nil, fmt.Errorf("解析发布信息失败: %w", err)
+		if errors.Is(err, subfetch.ErrProxyUnavailable) {
+			return nil, fmt.Errorf("本地代理不可用（内核未运行），无法检查更新：%v", err)
 		}
-		return &rel, nil
+		return nil, fmt.Errorf("经本地代理连接 GitHub 失败：%v", err)
 	}
-	return nil, fmt.Errorf("无法连接 GitHub：%v", lastErr)
+	var rel ghRelease
+	if err := json.Unmarshal(data, &rel); err != nil {
+		return nil, fmt.Errorf("解析发布信息失败: %w", err)
+	}
+	return &rel, nil
 }
 
 func findAsset(rel *ghRelease, name string) *ghAsset {
@@ -360,107 +330,22 @@ func (a *App) setUpdateProgress(stage string, pct int, msg string) {
 
 // ------------------------- 下载 / 校验 -------------------------
 
-// downloadTo 下载 rawURL 到 dst，边写边算 SHA256；progress 回调下载百分比。
+// downloadTo 经本地代理下载 rawURL 到 dst，边写边算 SHA256；progress 回调下载百分比。
 func (a *App) downloadTo(rawURL, dst string, size int64, progress func(int)) (string, error) {
-	var lastErr error
-	for _, c := range a.updateClients(15 * time.Minute) {
-		sum, err := downloadWith(c, rawURL, dst, size, progress)
-		if err == nil {
-			return sum, nil
-		}
-		lastErr = err
-		os.Remove(dst)
-	}
-	return "", lastErr
+	return updfetch.Download(updfetch.Request{
+		URL:       rawURL,
+		UserAgent: updateUserAgent(),
+		MaxBytes:  updateMaxZipBytes,
+	}, dst, size, a.updateProxyOptions(15*time.Minute), progress)
 }
 
-func downloadWith(c *http.Client, rawURL, dst string, size int64, progress func(int)) (string, error) {
-	req, err := updateRequest(context.Background(), rawURL)
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("下载失败：HTTP %d", resp.StatusCode)
-	}
-	if resp.ContentLength > 0 {
-		size = resp.ContentLength
-	}
-	if size > updateMaxZipBytes {
-		return "", fmt.Errorf("安装包过大（%d 字节）", size)
-	}
-	f, err := os.Create(dst)
-	if err != nil {
-		return "", err
-	}
-	h := sha256.New()
-	var done int64
-	buf := make([]byte, 64<<10)
-	lastPct := -1
-	body := io.LimitReader(resp.Body, updateMaxZipBytes+1)
-	for {
-		n, rerr := body.Read(buf)
-		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				f.Close()
-				return "", werr
-			}
-			h.Write(buf[:n])
-			done += int64(n)
-			if done > updateMaxZipBytes {
-				f.Close()
-				return "", fmt.Errorf("安装包过大")
-			}
-			if size > 0 && progress != nil {
-				if pct := int(done * 100 / size); pct != lastPct {
-					lastPct = pct
-					progress(pct)
-				}
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			f.Close()
-			return "", rerr
-		}
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// fetchSmall 下载小文件（.sha256）到内存。
+// fetchSmall 经本地代理下载小文件（.sha256）到内存。
 func (a *App) fetchSmall(rawURL string) ([]byte, error) {
-	var lastErr error
-	for _, c := range a.updateClients(60 * time.Second) {
-		req, err := updateRequest(context.Background(), rawURL)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := c.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		resp.Body.Close()
-		if err == nil && resp.StatusCode != http.StatusOK {
-			err = fmt.Errorf("HTTP %d", resp.StatusCode)
-		}
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return data, nil
-	}
-	return nil, lastErr
+	return updfetch.Get(updfetch.Request{
+		URL:       rawURL,
+		UserAgent: updateUserAgent(),
+		MaxBytes:  64 << 10,
+	}, a.updateProxyOptions(60*time.Second))
 }
 
 var sha256HexRe = regexp.MustCompile(`(?i)\b[0-9a-f]{64}\b`)

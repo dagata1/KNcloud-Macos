@@ -84,6 +84,7 @@ export namespace main {
 	    coreState: string;
 	    coreError: string;
 	    corePortError: boolean;
+	    coreDirectOnly: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new CoreStatus(source);
@@ -110,6 +111,7 @@ export namespace main {
 	        this.coreState = source["coreState"];
 	        this.coreError = source["coreError"];
 	        this.corePortError = source["corePortError"];
+	        this.coreDirectOnly = source["coreDirectOnly"];
 	    }
 	}
 	export class LogItem {

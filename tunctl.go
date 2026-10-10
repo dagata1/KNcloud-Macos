@@ -250,7 +250,6 @@ func (a *App) tunStartLocked() error {
 
 	// 2) Xray 以 TUN 配置（出站绑物理网卡、无 mux、只嗅探 http/tls）启动/重启
 	// tunEgressIface 非空时 buildCoreConfigJSON 固定按 global 生成规则，a.routingMode 不动
-	wasCore := a.coreRunning
 	a.tunEgressIface = ifc.Name
 	a.tunUDPPort = pickFreeLoopbackPort()
 	if err := a.startCoreLocked(); err != nil {
@@ -259,11 +258,8 @@ func (a *App) tunStartLocked() error {
 		a.tunUDPPort = 0
 		a.stopNativeTun()
 		a.coreRunning = false
-		if wasCore {
-			if rerr := a.startCoreLocked(); rerr == nil {
-				a.coreRunning = true
-			}
-		}
+		// 内核常开：按普通（非 TUN）配置拉回来，起不来就降级直连 + 自动重试
+		a.ensureCoreRunningLocked()
 		return fmt.Errorf("start core failed: %v", err)
 	}
 	a.coreRunning = true
@@ -355,14 +351,18 @@ func (a *App) tunSoftStopLocked() {
 	if a.tunEgressIface != "" {
 		a.tunEgressIface = ""
 		a.tunUDPPort = 0
-		if a.coreRunning {
+		// 内核常开：恢复为普通代理配置（退出清理时 cleaned 已置位，不再拉起）
+		if !a.exiting() {
 			if err := a.startCoreLocked(); err != nil {
-				a.coreRunning = false
-				a.handleCoreStartFailureLocked(err, true)
 				a.addLogInternal("error", fmt.Sprintf("Restart core after TUN stop failed: %v", err))
+				a.handleCoreStartFailureLocked(err, true)
+			} else {
+				a.coreRunning = true
+				a.markCoreRunningLocked(true)
 			}
 		}
 	}
+	a.ensureCoreRunningLocked()
 	a.resumeSystemProxyAfterTunLocked()
 	if wasRunning {
 		a.addLogInternal("info", fmt.Sprintf("TUN stopped, back to system-proxy mode with policy %s (adapter kept installed)", a.routingMode))
@@ -394,8 +394,8 @@ func (a *App) resumeSystemProxyAfterTunLocked() {
 		return
 	}
 	if !a.coreRunning {
-		// 内核也停了（ToggleCore 停止）：只记下「系统代理应开启」，内核再启动时由 ToggleCore 写回
-		a.systemProxy = true
+		// 内核暂时没起来（自动重试中）：记下「系统代理应开启」，内核恢复时由 reapplySysProxyLocked 写回
+		a.sysProxyPending = true
 		return
 	}
 	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)

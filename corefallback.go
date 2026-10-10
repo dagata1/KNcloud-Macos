@@ -7,35 +7,42 @@ import (
 	"syscall"
 	"time"
 
+	"v2rayN-win11/internal/connstate"
+
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// ------------------------- 内核启动失败兜底 -------------------------
+// ------------------------- 内核常开 / 启动失败兜底 -------------------------
 //
-// 启动（或重启）Xray 内核失败时：
-//   - 端口被占用：不自动重试（重试只会以同样的原因失败），状态里标记 CorePortError，
-//     界面提示去「首选项设置」更换端口；改了端口会自动重新拉起（见 SaveSettings）；
-//   - 其它错误：按 coreRetryBackoff 退避自动重试，等待期间不持有 a.mu；
-//     换节点 / 手动开关或重启内核 / 退出都会让正在等待的重试作废（coreRetryGen）；
-//   - 全部重试失败：停在「启动失败」状态，等用户点「重启内核」（仪表盘或托盘菜单）。
-//
-// 内核不在时系统代理指向一个没人监听的端口，整机断网。所以失败时（非 TUN）暂时撤下
-// 系统代理、记下 sysProxyPending，内核恢复后再按原样开启。
+// 只要程序开着，内核就一直在跑（「直连」只是不走代理，内核照常运行）：
+//   - 没有选中节点（首次登录前、节点全删光）：内核以「只有直连出站」的配置启动，
+//     本地 SOCKS / HTTP 入站照样监听（startCoreLocked）；
+//   - 端口被别的程序占用：启动时自动换到空闲端口并写回设置（ensureCorePortsLocked），
+//     系统代理随之指向新端口；
+//   - 节点配置起不来（协议桥失败、配置错误……）：立即降级为直连配置运行（coreFallback），
+//     再按退避节奏重试节点配置；重试表用完仍不行就保持直连运行，等用户换节点；
+//   - 启动时连直连配置都起不来：弹窗报错「内核无法启动」并退出程序（startupCoreFatal）；
+//   - 运行中连直连配置都起不来（极少见）：撤下系统代理避免整机断网，然后一直重试
+//     （先按重试表，之后每 connstate.SteadyCoreRetry 一次），直到内核起来或程序退出。
+// 换节点 / 内部重启内核 / 退出都会让正在等待的重试作废（coreRetryGen）。
 
 // coreRetryBackoff 自动重试前的等待时间（第 1、2、3 次重试）。
 var coreRetryBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
 
+// coreRetrySchedule 自动重试的等待表（macOS 没有开机隐藏启动的长重试表，统一用 coreRetryBackoff）。
+func (a *App) coreRetrySchedule() []time.Duration { return coreRetryBackoff }
+
 // errPortInUse 内核监听端口被占用。
 var errPortInUse = errors.New("port already in use")
 
-// portInUseError startCoreLocked 端口预检失败时返回，errors.Is(err, errPortInUse) 为真。
+// portInUseError 连自动换端口都找不到空闲端口时返回，errors.Is(err, errPortInUse) 为真。
 type portInUseError struct {
 	name string
 	port int
 }
 
 func (e *portInUseError) Error() string {
-	return fmt.Sprintf("%s port %d is already in use, please change the port in Preferences", e.name, e.port)
+	return fmt.Sprintf("%s port %d is already in use and no free port could be found", e.name, e.port)
 }
 
 func (e *portInUseError) Is(target error) bool { return target == errPortInUse }
@@ -55,26 +62,38 @@ func looksLikePortInUse(err error) bool {
 		strings.Contains(msg, "wsaeaddrinuse")
 }
 
-// noteCoreFailureLocked 记录内核启动失败（调用方持有写锁，且 coreRunning 已为 false）。
-// 非 TUN 时暂时撤下系统代理，免得整机流量涌向一个没人监听的端口。
+// exiting 程序正在退出（或退出清理已跑过）：不再拉起内核。
+func (a *App) exiting() bool { return a.quitting.Load() || a.cleaned.Load() }
+
+// noteCoreFailureLocked 记录内核启动失败（调用方持有写锁）。内核完全没在运行且非 TUN 时
+// 暂时撤下系统代理，免得整机流量涌向一个没人监听的端口；内核恢复后由
+// markCoreRunningLocked / reapplySysProxyLocked 按原样开回。
 func (a *App) noteCoreFailureLocked(err error) {
 	a.coreErr = err.Error()
 	a.corePortErr = looksLikePortInUse(err)
-	if !a.tunRunning && a.systemProxy {
-		if perr := setSystemProxy(false, ""); perr == nil {
-			a.systemProxy = false
-			a.sysProxyPending = true
-			a.addLogInternal("warn", "Core is not running: system proxy temporarily disabled, it will be restored once the core is back")
-		}
+	if a.coreRunning || a.tunRunning || !a.systemProxy {
+		return
+	}
+	if perr := setSystemProxy(false, ""); perr == nil {
+		a.systemProxy = false
+		a.sysProxyPending = true
+		a.addLogInternal("warn", "Core is not running: system proxy temporarily disabled, it will be restored once the core is back")
 	}
 }
 
-// markCoreRunningLocked 内核已成功启动（调用方持有写锁，coreRunning 已为 true）：清除失败状态；
-// applyProxy 为 true 且之前因失败撤下了系统代理（或启动时没来得及开）时，按当前模式重新开启。
-// TUN 运行时系统代理处于暂停状态，由 TUN 逻辑负责，这里不碰。
+// markCoreRunningLocked 内核已以正常配置成功启动（调用方持有写锁，coreRunning 已为 true）：
+// 清除失败 / 兜底状态；applyProxy 为 true 时把之前撤下的系统代理开回来。
 func (a *App) markCoreRunningLocked(applyProxy bool) {
-	a.coreErr, a.corePortErr, a.coreRetrying = "", false, false
-	if !applyProxy || a.tunRunning || !(a.sysProxyPending || a.systemProxy) {
+	a.coreErr, a.corePortErr, a.coreRetrying, a.coreFallback = "", false, false, false
+	if applyProxy {
+		a.reapplySysProxyLocked()
+	}
+}
+
+// reapplySysProxyLocked 内核又在跑了：之前因故障撤下的（或启动时没来得及开的）系统代理
+// 按当前端口重新开启。TUN 运行时系统代理处于暂停状态，由 TUN 逻辑负责，这里不碰。
+func (a *App) reapplySysProxyLocked() {
+	if !a.coreRunning || a.tunRunning || !a.sysProxyPending || a.exiting() {
 		return
 	}
 	server := fmt.Sprintf("127.0.0.1:%d", a.settings.HttpPort)
@@ -87,22 +106,68 @@ func (a *App) markCoreRunningLocked(applyProxy bool) {
 	a.addLogInternal("info", fmt.Sprintf("System proxy enabled -> %s", server))
 }
 
-// handleCoreStartFailureLocked 记录失败并决定后续：端口占用只提示，其它错误安排自动重试
-// （调用方持有写锁）。重试协程在锁外等待。
+// fallbackToDirectLocked 节点配置起不来：改以直连配置运行内核（调用方持有写锁，内核已停）。
+// 成功返回 true（coreRunning=true、coreFallback=true，失败原因保留在 coreErr）。
+func (a *App) fallbackToDirectLocked(cause error) bool {
+	if a.exiting() {
+		return false
+	}
+	if err := a.startDirectCoreLocked(); err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Direct-only core failed to start too: %v", err))
+		return false
+	}
+	a.coreRunning = true
+	a.coreFallback = true
+	a.coreErr = cause.Error()
+	a.corePortErr = looksLikePortInUse(cause)
+	a.addLogInternal("warn", fmt.Sprintf("Node config could not start the core (%v); core is running direct-only until the node recovers", cause))
+	a.reapplySysProxyLocked()
+	return true
+}
+
+// handleCoreStartFailureLocked startCoreLocked 失败后的统一处理（调用方持有写锁）：
+// 有节点就先降级为直连配置让内核继续跑，再安排自动重试；连直连都起不来就撤系统代理、一直重试。
 // toast 为 false 时不弹提示（调用方自己把错误返回给界面）。
 func (a *App) handleCoreStartFailureLocked(err error, toast bool) {
-	a.noteCoreFailureLocked(err)
-	if a.corePortErr {
-		a.coreRetrying = false
-		if !toast {
-			return
-		}
-		a.emitToast(fmt.Sprintf("内核启动失败：端口被占用（%v）。请在「首选项设置」中更换 SOCKS/HTTP 端口", err), "error")
+	a.coreRunning = false
+	a.coreErr = err.Error()
+	a.corePortErr = looksLikePortInUse(err)
+	if a.exiting() {
 		return
+	}
+	if a.activeNodeLocked() != nil {
+		a.fallbackToDirectLocked(err)
+	}
+	if !a.coreRunning {
+		a.noteCoreFailureLocked(err)
 	}
 	a.coreRetrying = true
 	gen := a.coreRetryGen.Add(1)
 	go a.coreRetryLoop(gen)
+	if !toast {
+		return
+	}
+	if a.coreRunning {
+		a.emitToast(fmt.Sprintf("当前节点无法启动内核，已临时以直连运行，正在自动重试（%v）", err), "error")
+	} else {
+		a.emitToast(fmt.Sprintf("内核启动失败，正在自动重试（%v）", err), "error")
+	}
+}
+
+// ensureCoreRunningLocked 内核没在运行就拉起来（调用方持有写锁）：先按当前节点（或无节点的
+// 直连配置）启动，失败走 handleCoreStartFailureLocked（降级直连 + 自动重试）。
+// 各种会让内核停下的路径收尾时都调用它，保证不会停在「内核没开」。
+func (a *App) ensureCoreRunningLocked() {
+	if a.coreRunning || a.exiting() {
+		return
+	}
+	if err := a.startCoreLocked(); err != nil {
+		a.addLogInternal("error", fmt.Sprintf("Core start failed: %v", err))
+		a.handleCoreStartFailureLocked(err, true)
+		return
+	}
+	a.coreRunning = true
+	a.markCoreRunningLocked(true)
 }
 
 func (a *App) emitToast(msg, typ string) {
@@ -118,11 +183,25 @@ func (a *App) emitRefresh() {
 	tray.requestRebuild()
 }
 
-// coreRetryLoop 按退避节奏重试启动内核。gen 过期（被取消）或程序退出时立即结束。
+// coreRetryLoop 按退避节奏重试以正常配置启动内核。gen 过期（被取消）或程序退出时立即结束。
+//   - 内核完全没在运行：重试表用完后继续每 connstate.SteadyCoreRetry 重试一次，永不放弃；
+//   - 内核以直连兜底运行：重试表用完就停，保持直连运行。
+//
+// 每次失败后立即重新降级为直连配置（startCoreLocked 会先停掉兜底实例）。
 func (a *App) coreRetryLoop(gen uint64) {
-	canceled := func() bool { return a.coreRetryGen.Load() != gen || a.quitting.Load() }
-	for i, wait := range coreRetryBackoff {
-		a.addLogInternal("info", fmt.Sprintf("Core restart attempt %d/%d in %s", i+1, len(coreRetryBackoff), wait))
+	canceled := func() bool { return a.coreRetryGen.Load() != gen || a.exiting() }
+	schedule := a.coreRetrySchedule()
+	coreDown := true
+	if a.lockWithin(10*time.Second, canceled) {
+		coreDown = !a.coreRunning
+		a.mu.Unlock()
+	}
+	for i := 0; ; i++ {
+		wait, ok := connstate.CoreRetryWait(schedule, i, coreDown)
+		if !ok {
+			break
+		}
+		a.addLogInternal("info", fmt.Sprintf("Core restart attempt %d in %s", i+1, wait))
 		deadline := time.Now().Add(wait)
 		for time.Now().Before(deadline) {
 			if canceled() {
@@ -136,7 +215,12 @@ func (a *App) coreRetryLoop(gen uint64) {
 			}
 			continue // 锁被长操作占着：算一次失败，继续退避
 		}
-		if canceled() || a.coreRunning {
+		if canceled() {
+			a.mu.Unlock()
+			return
+		}
+		if a.coreRunning && !a.coreFallback {
+			a.coreRetrying = false // 别的路径已经把内核以正常配置拉起来了
 			a.mu.Unlock()
 			return
 		}
@@ -147,38 +231,40 @@ func (a *App) coreRetryLoop(gen uint64) {
 			a.addLogInternal("info", fmt.Sprintf("Core recovered on retry %d", i+1))
 			a.savePersisted()
 			a.mu.Unlock()
-			a.emitToast("内核已恢复运行", "success")
+			a.emitToast("内核已恢复正常运行", "success")
 			a.emitRefresh()
 			return
 		}
 		a.coreRunning = false
-		a.noteCoreFailureLocked(err)
 		a.addLogInternal("error", fmt.Sprintf("Core restart attempt %d failed: %v", i+1, err))
-		if a.corePortErr {
-			a.coreRetrying = false
-			a.mu.Unlock()
-			a.emitToast("内核启动失败：端口被占用。请在「首选项设置」中更换 SOCKS/HTTP 端口", "error")
-			a.emitRefresh()
-			return
+		a.coreErr = err.Error()
+		a.corePortErr = looksLikePortInUse(err)
+		if a.activeNodeLocked() != nil {
+			a.fallbackToDirectLocked(err)
 		}
+		if !a.coreRunning {
+			a.noteCoreFailureLocked(err)
+		}
+		coreDown = !a.coreRunning
 		a.mu.Unlock()
 		a.emitRefresh()
 	}
+	// 只有「直连兜底在跑、节点仍起不来」才会走到这里
 	a.mu.Lock()
-	if a.coreRetryGen.Load() == gen && !a.coreRunning {
+	if a.coreRetryGen.Load() == gen && a.coreFallback {
 		a.coreRetrying = false
-		a.addLogInternal("error", "Core failed to start after all retries; use 「重启内核」 to try again")
+		a.addLogInternal("error", "Node still cannot start the core after all retries; core stays running direct-only. Pick another node")
 		a.mu.Unlock()
-		a.emitToast("内核启动失败，已停止自动重试。可在仪表盘点击「重启内核」重试", "error")
+		a.emitToast("当前节点仍无法启动内核，内核保持直连运行。可换个节点", "error")
 		a.emitRefresh()
 		return
 	}
 	a.mu.Unlock()
 }
 
-// RestartCore 「重启内核」：停止并重新启动内核，成功后按当前模式重新应用系统代理
+// RestartCore 停止并重新启动内核（界面已无按钮，仅供换节点 / 更新回滚等内部路径调用）：停止并重新启动内核，成功后按当前模式重新应用系统代理
 // （TUN 运行时系统代理保持暂停，由 TUN 逻辑负责）。会取消正在等待的自动重试。
-// 失败时返回错误：端口占用直接提示改端口，其它错误转入自动重试。
+// 失败时内核降级为直连配置继续运行（或一直重试），并把原因返回给界面。
 func (a *App) RestartCore() (CoreStatus, error) {
 	a.coreRetryGen.Add(1)
 	if !a.lockWithin(15*time.Second, a.quitting.Load) {
@@ -191,12 +277,12 @@ func (a *App) RestartCore() (CoreStatus, error) {
 	if err != nil {
 		a.addLogInternal("error", fmt.Sprintf("Core restart failed: %v", err))
 		a.handleCoreStartFailureLocked(err, false)
-		port := a.corePortErr
+		fallback := a.coreRunning
 		a.savePersisted()
 		a.mu.Unlock()
 		a.emitRefresh()
-		if port {
-			return a.GetCoreStatus(), fmt.Errorf("端口被占用，请在「首选项设置」中更换端口（%v）", err)
+		if fallback {
+			return a.GetCoreStatus(), fmt.Errorf("当前节点无法启动内核，已临时以直连运行，正在自动重试（%v）", err)
 		}
 		return a.GetCoreStatus(), fmt.Errorf("内核启动失败，正在自动重试（%v）", err)
 	}
@@ -211,4 +297,19 @@ func (a *App) RestartCore() (CoreStatus, error) {
 	a.mu.Unlock()
 	a.emitRefresh()
 	return a.GetCoreStatus(), nil
+}
+
+// startupCoreFatal 启动时内核（含直连兜底配置）完全起不来：弹窗报错后退出程序。
+// 内核是程序的核心，起不来就没有继续运行的意义，不再在后台无限重试。
+func (a *App) startupCoreFatal(err error) {
+	a.coreRetryGen.Add(1) // 取消已安排的自动重试
+	a.addLogInternal("error", fmt.Sprintf("Core cannot start, exiting: %v", err))
+	if ctx := a.appCtx(); ctx != nil {
+		runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
+			Type:    runtime.ErrorDialog,
+			Title:   "KNcloud 无法启动",
+			Message: fmt.Sprintf("内核无法启动，程序将退出。\n\n原因：%v", err),
+		})
+	}
+	a.quitApp()
 }
