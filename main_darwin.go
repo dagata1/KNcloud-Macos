@@ -61,7 +61,7 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 243, G: 243, B: 243, A: 255},
+		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0}, // 透明底色：圆角外不露白
 		Menu:             buildAppMenu(app),
 		OnStartup:        app.startup,
 		OnBeforeClose:    app.beforeClose,
@@ -80,7 +80,7 @@ func main() {
 		},
 		Mac: &mac.Options{
 			Appearance:           mac.DefaultAppearance,
-			WebviewIsTransparent: false,
+			WebviewIsTransparent: true,
 			WindowIsTranslucent:  false,
 			About: &mac.AboutInfo{
 				Title:   "KNcloud " + appVersion,

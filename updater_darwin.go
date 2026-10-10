@@ -4,7 +4,7 @@ package main
 
 // updater_darwin.go —— macOS 在线更新：
 //
-//	下载 KNcloud-macOS-<tag>.zip 与 .sha256（KNcloud-Macos 仓库的 Release）→ 校验 SHA256
+//	下载 KNcloud-macOS-<tag>.zip 与 .sha256（KNcloud-macOS 仓库的 Release）→ 校验 SHA256
 //	→ ditto 解压到 ~/Library/Application Support/KNcloud/update/<tag>
 //	→ 校验新 .app 的可执行文件是 Mach-O → 停内核 / TUN、还原系统代理
 //	→ 当前 .app 改名为 .app.old，新 .app 移入原位置（失败回滚）

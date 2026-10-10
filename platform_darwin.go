@@ -20,7 +20,7 @@ const cutConnsOnRoutingSwitch = true
 const defaultTheme = "system"
 
 // updateRepo macOS 版在线更新查询的 GitHub 仓库。
-const updateRepo = "dagata1/KNcloud-Macos"
+const updateRepo = "dagata1/KNcloud-macOS"
 
 // releaseZipName macOS 发布包（ditto 打包的 KNcloud.app，universal 二进制）。
 func releaseZipName(tag string) string { return "KNcloud-macOS-" + tag + ".zip" }
