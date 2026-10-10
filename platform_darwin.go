@@ -12,6 +12,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// cutConnsOnRoutingSwitch 切换分流模式时是否切断按旧策略建立的连接。macOS 上浏览器复用
+// 长连接，不切断的话刷新页面不生效，必须重启浏览器。
+const cutConnsOnRoutingSwitch = true
+
 // updateRepo macOS 版在线更新查询的 GitHub 仓库。
 const updateRepo = "dagata1/KNcloud-Macos"
 

@@ -1,0 +1,25 @@
+{
+  "fill-specializations" : [
+    { "value" : { "solid" : "srgb:1.00000,1.00000,1.00000,1.00000" } },
+    { "appearance" : "dark", "value" : { "solid" : "srgb:0.00000,0.00000,0.00000,1.00000" } }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name-specializations" : [
+            { "value" : "kn-black.png" },
+            { "appearance" : "dark", "value" : "kn-white.png" }
+          ],
+          "name" : "KN"
+        }
+      ],
+      "name" : "Mark",
+      "shadow" : { "kind" : "neutral", "opacity" : 0.5 },
+      "specular" : true,
+      "translucency" : { "enabled" : false, "value" : 0.5 }
+    }
+  ],
+  "supported-platforms" : { "squares" : "shared" }
+}

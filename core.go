@@ -872,5 +872,20 @@ func (a *App) applyRoutingLocked() error {
 	if err := sr.Reload(rc); err != nil {
 		return fmt.Errorf("%w: reload routing: %v", errHotSwapUnavailable, err)
 	}
+	if !cutConnsOnRoutingSwitch {
+		return nil
+	}
+	// macOS：浏览器会长期复用已建立的 keep-alive / HTTP2 隧道，刷新页面仍走旧出口，
+	// 所以换策略后按代际切断旧连接，强制客户端重连并按新规则路由（Windows 保持 #13 行为）。
+	// mux 出站上的子连接不经系统拨号器，记账看不到；换一个同节点的新 handler 释放其 mux 连接。
+	if proxyUsesMux(*node, a.settings.MuxEnabled && a.tunEgressIface == "") {
+		if err := a.hotSwapProxyOutboundLocked(*node); err != nil {
+			return fmt.Errorf("%w: refresh proxy outbound: %v", errHotSwapUnavailable, err)
+		}
+	}
+	cut := outboundConnTracker.Advance()
+	if n := outboundConnTracker.CloseAllBefore(inst, cut); n > 0 {
+		a.addLogInternal("info", fmt.Sprintf("Closed %d connection(s) routed by the previous policy", n))
+	}
 	return nil
 }

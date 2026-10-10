@@ -158,6 +158,18 @@ func TestSetRoutingModeKeepsExistingConnections(t *testing.T) {
 	if _, err := a.SetRoutingMode("direct"); err != nil {
 		t.Fatal(err)
 	}
+	if cutConnsOnRoutingSwitch {
+		// macOS：换策略切断旧连接，新隧道按新规则建立
+		if !waitClosed(c, 3*time.Second) {
+			t.Fatal("macOS 上换策略应切断按旧策略建立的连接")
+		}
+		c2 := socksDial(t, port, echo)
+		defer c2.Close()
+		if err := echoOnce(c2, "after"); err != nil {
+			t.Fatalf("换策略后新隧道应可用: %v", err)
+		}
+		return
+	}
 	if waitClosed(c, 1500*time.Millisecond) {
 		t.Fatal("换策略不应切断已建立的连接")
 	}

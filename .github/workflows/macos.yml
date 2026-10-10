@@ -135,6 +135,31 @@ jobs:
       - name: wails build (darwin/universal)
         run: wails build -platform darwin/universal -clean -ldflags "-X main.appVersion=${{ steps.ver.outputs.app }}"
 
+      - name: App icon (light / dark / tinted on macOS 26, legacy .icns for 12-15)
+        run: |
+          set -euo pipefail
+          APP=build/bin/KNcloud.app
+          XC="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "$XC" ]; then echo "::error::Xcode 26 not found on runner"; ls -d /Applications/Xcode*.app; exit 1; fi
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcrun actool --version
+          mkdir -p icon-out
+          xcrun actool build/darwin/AppIcon.icon \
+            --compile icon-out \
+            --platform macosx --target-device mac \
+            --minimum-deployment-target 12.0 \
+            --app-icon AppIcon --include-all-app-icons \
+            --output-partial-info-plist icon-out/partial.plist \
+            --output-format human-readable-text --notices --warnings --errors
+          ls -la icon-out
+          test -f icon-out/Assets.car
+          cp icon-out/Assets.car "$APP/Contents/Resources/Assets.car"
+          plutil -replace CFBundleIconName -string AppIcon "$APP/Contents/Info.plist"
+          xcrun assetutil --info "$APP/Contents/Resources/Assets.car" > icon-assets.json
+          grep -c '"Appearance"' icon-assets.json || true
+          grep -o '"Appearance" : "[^"]*"' icon-assets.json | sort | uniq -c || true
+          # keep Wails' iconfile.icns (built from build/appicon.png) as the CFBundleIconFile fallback
+
       - name: Bundle geo data, ad-hoc codesign, verify
         run: |
           APP=build/bin/KNcloud.app
@@ -241,6 +266,8 @@ jobs:
             smoke.log
             gui-*.png
             gui-app.log
+            icon-assets.json
+            icon-out/
           if-no-files-found: ignore
 
       - name: Create Release
