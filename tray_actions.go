@@ -39,18 +39,6 @@ func (a *App) traySelectNode(id string) {
 	tray.requestRebuild()
 }
 
-// trayRestartCore 托盘「重启内核」。
-func (a *App) trayRestartCore() {
-	if _, err := a.RestartCore(); err != nil {
-		a.addLogInternal("error", fmt.Sprintf("Tray: restart core failed: %v", err))
-		a.emitToast("重启内核失败："+err.Error(), "error")
-	} else {
-		a.emitToast("内核已重新启动", "success")
-	}
-	a.notifyFrontend()
-	tray.requestRebuild()
-}
-
 func (a *App) traySetRoutingMode(mode string) {
 	a.SetRoutingMode(mode)
 	a.notifyFrontend()
