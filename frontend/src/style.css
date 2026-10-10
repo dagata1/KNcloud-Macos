@@ -1591,6 +1591,10 @@ select.win11-input option {
 
 /* ---------- 订阅卡：左半账户/流量/操作，右半实时速率 ---------- */
 .acct-split { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
+/* 订阅卡占左侧两行加高；模式切换收窄放在右侧实时速率下方 */
+.acct-split > .acct-left { grid-row: span 2; justify-content: space-between; padding: 18px 20px 20px; }
+.acct-split > .acct-mode { grid-column: 2 / span 2; margin: 0; padding: 6px; }
+.acct-mode .mode-switch.mode-switch-full .segment-btn { min-height: 44px; font-size: 14px; padding: 0 6px; }
 .acct-left { padding: 14px 20px 18px; margin: 0; justify-content: center; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .acct-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .acct-email {
@@ -1820,8 +1824,12 @@ select.win11-input option {
 .platform-mac .qp-top { gap: 8px; }
 .platform-mac .qp-name { font-size: 13px; letter-spacing: -0.1px; }
 /* 模式切换：去掉外层卡片，改成 macOS 原生分段控件（单一选中块，无下划线） */
-.platform-mac .mode-card,
-.platform-mac .mode-card:hover { background: transparent; border: none; box-shadow: none; padding: 0; }
+.platform-mac .mode-card:not(.acct-mode),
+.platform-mac .mode-card:not(.acct-mode):hover { background: transparent; border: none; box-shadow: none; padding: 0; }
+.platform-mac .acct-split > .acct-mode { padding: 6px; display: flex; align-items: center; }
+.platform-mac .acct-split > .acct-mode .mode-switch.mode-switch-full { width: 100%; }
+.platform-mac .acct-split > .acct-mode .mode-switch.mode-switch-full .segment-btn { min-height: 34px; padding: 0 4px; }
+.platform-mac .acct-split > .acct-left { padding: 12px 14px 14px; }
 .platform-mac .mode-switch.mode-switch-full { padding: 2px; gap: 4px; border-radius: 7px; background: rgba(128, 128, 128, 0.14); }
 .platform-mac .mode-switch.mode-switch-full .segment-indicator {
   top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px - 3 * 4px) / 4);
@@ -1839,3 +1847,17 @@ select.win11-input option {
 .platform-mac .qp-hint { display: none; }
 .platform-mac .content-header-right .mode-switch.mode-switch-full { display: inline-grid; width: auto; height: 30px; box-sizing: border-box; }
 .platform-mac .content-header-right .mode-switch.mode-switch-full .segment-btn { min-height: 0; height: 100%; padding: 0 12px; font-size: 12.5px; }
+
+/* 订阅卡底部：剩余流量 / 可用节点 / 上次同步 */
+.acct-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.acct-meta-item {
+  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; min-width: 0;
+}
+.acct-meta-item + .acct-meta-item { border-left: 1px solid var(--border-subtle); }
+.acct-meta-item > span { max-width: 100%; }
+.acct-meta-label { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-meta-val {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.platform-mac .acct-meta { margin-top: 10px; }
