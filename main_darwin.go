@@ -42,7 +42,7 @@ func main() {
 	app.addLogInternal("info", "KNcloud for macOS version "+appVersion)
 	sysProxySocksPort.Store(int32(app.settings.SocksPort))
 
-	width, height := 1120, 760
+	width, height := 920, 580 // Mac 普通模式：窄且矮，刚好装下仪表盘内容
 	if !app.account.LoggedIn || app.settings.UiMode == "simple" {
 		width, height = 420, 640
 	}
@@ -56,7 +56,7 @@ func main() {
 		Width:     width,
 		Height:    height,
 		MinWidth:  380,
-		MinHeight: 560,
+		MinHeight: 480,
 		Frameless: true, // 与 Windows 版相同的自绘标题栏（最小化 / 最大化 / 关闭按钮在右上角）
 		AssetServer: &assetserver.Options{
 			Assets: assets,

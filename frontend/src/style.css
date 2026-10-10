@@ -1792,3 +1792,50 @@ select.win11-input option {
 .theme-menu-item:focus { outline: none; }
 .theme-menu-item svg { color: var(--text-secondary); flex-shrink: 0; }
 .theme-menu-label { flex: 1; }
+
+/* ---------- macOS 紧凑布局：Mac 屏幕普遍较小，整体收紧一档 ---------- */
+.platform-mac { --sidebar-w: 184px; --titlebar-h: 36px; }
+.platform-mac .nav-sidebar { padding: 8px 6px; }
+.platform-mac .nav-top-actions { gap: 6px; }
+.platform-mac .hamburger-btn { width: 32px; height: 32px; }
+.platform-mac .nav-items-list { gap: 2px; margin-top: 6px; }
+.platform-mac .nav-item-btn { height: 32px; gap: 10px; padding: 0 10px; }
+.platform-mac .nav-item-btn.active::before { top: 8px; bottom: 8px; }
+.platform-mac .content-surface { padding: 14px 18px; }
+.platform-mac .content-header { margin-bottom: 12px; }
+.platform-mac .content-title { font-size: 17px; }
+.platform-mac .win11-card { padding: 12px; }
+.platform-mac .dash-stack { gap: 12px !important; }
+.platform-mac .acct-split { gap: 12px; }
+.platform-mac .acct-left { padding: 10px 14px 12px; gap: 8px; }
+.platform-mac .acct-email { font-size: 14px; }
+.platform-mac .acct-value { font-size: 16px; }
+.platform-mac .acct-bar { margin-top: 6px; }
+.platform-mac .acct-action { height: 28px; padding: 0 8px; }
+.platform-mac .acct-speed { margin: 4px 0 2px; font-size: 19px; }
+.platform-mac .qp-header { margin-bottom: 8px; }
+/* 节点卡片保持原尺寸（78px 高、原内边距与字号），Mac 只固定为 4 列 */
+.platform-mac .qp-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.platform-mac .qp-tile { padding-left: 12px; padding-right: 10px; }
+.platform-mac .qp-top { gap: 8px; }
+.platform-mac .qp-name { font-size: 13px; letter-spacing: -0.1px; }
+/* 模式切换：去掉外层卡片，改成 macOS 原生分段控件（单一选中块，无下划线） */
+.platform-mac .mode-card,
+.platform-mac .mode-card:hover { background: transparent; border: none; box-shadow: none; padding: 0; }
+.platform-mac .mode-switch.mode-switch-full { padding: 2px; gap: 4px; border-radius: 7px; background: rgba(128, 128, 128, 0.14); }
+.platform-mac .mode-switch.mode-switch-full .segment-indicator {
+  top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px - 3 * 4px) / 4);
+  border-radius: 5px; background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+}
+.platform-mac.dark-theme .mode-switch.mode-switch-full .segment-indicator {
+  background: rgba(255, 255, 255, 0.2); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.platform-mac .mode-switch .segment-indicator::after { display: none; }
+.platform-mac .mode-switch.mode-switch-full .segment-btn { min-height: 28px; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+.platform-mac .mode-switch.mode-switch-full .segment-btn.active { font-weight: 600; color: var(--text-primary); }
+/* Mac：模式切换放在页面标题行右侧、「内核运行中」左边；短标签紧凑分段，一键切换 */
+.content-header-right { display: flex; align-items: center; gap: 14px; }
+.platform-mac .qp-hint { display: none; }
+.platform-mac .content-header-right .mode-switch.mode-switch-full { display: inline-grid; width: auto; height: 30px; box-sizing: border-box; }
+.platform-mac .content-header-right .mode-switch.mode-switch-full .segment-btn { min-height: 0; height: 100%; padding: 0 12px; font-size: 12.5px; }

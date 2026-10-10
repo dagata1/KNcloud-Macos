@@ -95,7 +95,7 @@ export default function App() {
   const productName = isMac ? 'KNcloud' : 'KNcloud-WIN';
   // 简易模式内容少，窗口切到紧凑尺寸；普通模式恢复默认大小
   // （全局最小尺寸在 main.go 里放开了到 380x560，这里的目标值在其之上）
-  const WINDOW_SIZE = { simple: { w: 420, h: 640 }, classic: { w: 1120, h: 760 } };
+  const WINDOW_SIZE = { simple: { w: 420, h: 640 }, classic: isMac ? { w: 920, h: 580 } : { w: 1120, h: 760 } };
   const applyWindowSize = async (mode) => {
     const s = WINDOW_SIZE[mode] || WINDOW_SIZE.classic;
     // 窗口处于最大化时 SetSize 不生效，会一直停在大尺寸；先还原成普通窗口
@@ -1172,7 +1172,7 @@ export default function App() {
   // ---------------- 启动页（内核启动期间后端暂时忙，数据未就绪） ----------------
   if (!booted) {
     return (
-      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
+      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}${isMac ? ' platform-mac' : ''}`}>
         <header className="titlebar drag-region">
           <div className="titlebar-left">
             <img src={brandLogo} alt="KNcloud" style={{ height: "22px", width: "auto", display: "block" }} />
@@ -1193,7 +1193,7 @@ export default function App() {
   // ---------------- 登录页（未登录且未跳过时显示） ----------------
   if (account && !account.loggedIn) {
     return (
-      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
+      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}${isMac ? ' platform-mac' : ''}`}>
         <header className="titlebar drag-region">
           <div className="titlebar-left" />
           <div className="titlebar-right no-drag">
@@ -1258,7 +1258,7 @@ export default function App() {
     const routing = status.routingMode || 'bypass-cn';
     const simpleOn = status.tunnelMode || routing === 'bypass-cn';
     return (
-      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
+      <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}${isMac ? ' platform-mac' : ''}`}>
         <header className="titlebar drag-region">
           <div className="titlebar-left">
             <img src={brandLogo} alt={productName} style={{ height: "22px", width: "auto", display: "block" }} />
@@ -1420,8 +1420,42 @@ export default function App() {
     </div>
   );
 
+  // 代理模式四选一：Windows 版独占一行卡片；Mac 版放进节点卡片标题行，按文字宽度收窄
+  const modeSwitchEl = (
+                  <div
+                    className={`segmented-control mode-switch mode-switch-full ${pendingMode ? 'busy' : ''}`}
+                    role="radiogroup"
+                    aria-busy={!!pendingMode}
+                  >
+                    <span
+                      className="segment-indicator"
+                      aria-hidden="true"
+                      style={{ transform: `translateX(calc(${modeIndex} * (100% + 4px)))` }}
+                    />
+                    {[
+                      { id: 'bypass-cn', label: '绕过大陆', short: '绕过' },
+                      { id: 'global', label: '全局代理', short: '全局' },
+                      { id: 'direct', label: '全局直连', short: '直连' },
+                      { id: 'tun', label: 'TUN 模式', short: 'TUN', title: isMac ? '虚拟网卡（utun）全局接管整机流量（首次开启需输入管理员密码授权）' : '虚拟网卡全局接管整机流量（需管理员权限）' },
+                    ].map(m => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={shownMode === m.id}
+                        className={`segment-btn ${shownMode === m.id ? 'active' : ''}`}
+                        onClick={() => handleModeSelect(m.id)}
+                        title={m.title || (isMac ? m.label : undefined)}
+                      >
+                        {isMac ? m.short : m.label}
+                      </button>
+                    ))}
+                  </div>
+  );
+
+
   return (
-    <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}`}>
+    <div className={`app-window ${theme === 'dark' ? 'dark-theme' : ''}${isMac ? ' platform-mac' : ''}`}>
       {renderToasts()}
       {/* Windows 11 TitleBar */}
       <header className="titlebar drag-region">
@@ -1509,14 +1543,18 @@ export default function App() {
         <main className="content-surface">
           {/* TAB 1: DASHBOARD */}
           {activeTab === 'dashboard' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div className="dash-stack" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <div className="content-header">
                 <div>
                   <h1 className="content-title">运行状态概览</h1>
                 </div>
+                <div className="content-header-right">
+                {isMac && modeSwitchEl}
                 <div className={`core-status core-${coreState}`}>
                   <span className="core-dot" aria-hidden="true" />
                   <span className="core-label" title={status.coreError || ''}>{coreStateLabel}</span>
+                  {/* 「重启内核」平时隐藏，仅内核启动失败 / 重试中时出现，用于一键恢复 */}
+                  {coreBad && (
                   <button
                     type="button"
                     className={`win11-btn core-restart-btn ${coreBad ? 'primary' : ''}`}
@@ -1527,6 +1565,8 @@ export default function App() {
                     <RefreshCw size={13} className={restartingCore ? 'spin' : ''} />
                     {restartingCore ? '重启中…' : '重启内核'}
                   </button>
+                  )}
+                </div>
                 </div>
               </div>
 
@@ -1618,37 +1658,11 @@ export default function App() {
 
 
               {/* 代理模式：四个互斥按钮占满整行（状态由高亮按钮本身表达，不再单独展示） */}
+              {!isMac && (
               <div className="win11-card mode-card">
-                  <div
-                    className={`segmented-control mode-switch mode-switch-full ${pendingMode ? 'busy' : ''}`}
-                    role="radiogroup"
-                    aria-busy={!!pendingMode}
-                  >
-                    <span
-                      className="segment-indicator"
-                      aria-hidden="true"
-                      style={{ transform: `translateX(calc(${modeIndex} * (100% + 4px)))` }}
-                    />
-                    {[
-                      { id: 'bypass-cn', label: '绕过大陆' },
-                      { id: 'global', label: '全局代理' },
-                      { id: 'direct', label: '全局直连' },
-                      { id: 'tun', label: 'TUN 模式', title: isMac ? '虚拟网卡（utun）全局接管整机流量（首次开启需输入管理员密码授权）' : '虚拟网卡全局接管整机流量（需管理员权限）' },
-                    ].map(m => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={shownMode === m.id}
-                        className={`segment-btn ${shownMode === m.id ? 'active' : ''}`}
-                        onClick={() => handleModeSelect(m.id)}
-                        title={m.title}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
-                  </div>
+                {modeSwitchEl}
               </div>
+              )}
 
               {/* 未登录时没有订阅卡，实时速率单独成一张小卡 */}
               {!(account && account.loggedIn) && (
@@ -1659,7 +1673,7 @@ export default function App() {
               <div className="win11-card">
                 <div className="qp-header">
                   <div className="qp-title">
-                    <h3>推荐节点快速选择</h3>
+                    <h3>节点选择</h3>
                     {pingInProgress ? (
                       <span className="qp-testing"><LoaderCircle size={12} className="spin" />测速中…</span>
                     ) : (
