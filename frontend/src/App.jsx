@@ -379,10 +379,23 @@ export default function App() {
     }
   };
 
-  const themeTitle = themePref === 'system' ? '主题：跟随系统（点击切换到浅色）' : themePref === 'light' ? '主题：浅色（点击切换到深色）' : '主题：深色（点击切换到跟随系统）';
-  const handleThemeToggle = async () => {
-    // 跟随系统 → 浅色 → 深色 → 跟随系统
-    const next = themePref === 'system' ? 'light' : themePref === 'light' ? 'dark' : 'system';
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themeMenuRef = useRef(null);
+  useEffect(() => {
+    if (!themeMenuOpen) return undefined;
+    const onDown = (e) => {
+      if (themeMenuRef.current && !themeMenuRef.current.contains(e.target)) setThemeMenuOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setThemeMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [themeMenuOpen]);
+  const handleThemeSelect = async (next) => {
+    setThemeMenuOpen(false);
     setThemePref(next);
     try {
       await SaveSettings({ ...settings, theme: next, themeChosen: true });
@@ -391,6 +404,34 @@ export default function App() {
       // 主题切换失败不影响使用
     }
   };
+  const themeOptions = [
+    { id: 'light', label: '浅色', Icon: Sun },
+    { id: 'dark', label: '深色', Icon: Moon },
+    { id: 'system', label: '跟随系统', Icon: Monitor },
+  ];
+  const renderThemeMenu = () => (
+    <div className="theme-menu-wrap" ref={themeMenuRef}>
+      <button
+        className="theme-toggle-btn"
+        onClick={() => setThemeMenuOpen(o => !o)}
+        title="主题"
+      >
+        {theme === 'dark' ? <Moon size={15} /> : <Sun size={15} />}
+      </button>
+      {themeMenuOpen && (
+        <div className="theme-menu" role="menu">
+          {themeOptions.map(({ id, label, Icon }) => (
+            <button key={id} className="theme-menu-item" role="menuitemradio"
+              aria-checked={themePref === id} onClick={() => handleThemeSelect(id)}>
+              <Icon size={15} />
+              <span className="theme-menu-label">{label}</span>
+              {themePref === id ? <Check size={15} /> : <span style={{ width: 15 }} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 
   const handleUiModeToggle = async () => {
     const next = uiMode === 'classic' ? 'simple' : 'classic';
@@ -1226,9 +1267,7 @@ export default function App() {
             <button className="theme-toggle-btn" onClick={handleUiModeToggle} title="切换到普通模式（完整设置）">
               <SlidersHorizontal size={15} />
             </button>
-            <button className="theme-toggle-btn" onClick={handleThemeToggle} title={themeTitle}>
-              {themePref === 'system' ? <Monitor size={15} /> : themePref === 'light' ? <Sun size={15} /> : <Moon size={15} />}
-            </button>
+            {renderThemeMenu()}
             <button className="win-caption-btn" onClick={() => WindowMin()} title="最小化">
               <Minus size={13} />
             </button>
@@ -1396,13 +1435,7 @@ export default function App() {
           <button className="theme-toggle-btn" onClick={handleUiModeToggle} title="切换到简易模式（点击即用）">
             <LayoutGrid size={15} />
           </button>
-          <button
-            className="theme-toggle-btn"
-            onClick={handleThemeToggle}
-            title={themeTitle}
-          >
-            {themePref === 'system' ? <Monitor size={15} /> : themePref === 'light' ? <Sun size={15} /> : <Moon size={15} />}
-          </button>
+          {renderThemeMenu()}
           <button className="win-caption-btn" onClick={() => WindowMin()} title="最小化">
             <Minus size={13} />
           </button>
